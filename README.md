@@ -5,8 +5,9 @@ A decentralized harvest invoice financing protocol built on Stellar. InvoiceFi S
 The protocol transforms agricultural future yields into tradable financial assets, improving liquidity access for farmers while providing transparent yield-backed opportunities for investors.
 
 ---
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/7ec65e4a-4014-404f-a61b-012cb939ce31" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/0c648ce3-bf48-4b48-a7a7-c1b409caa419" />
 
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/7ec65e4a-4014-404f-a61b-012cb939ce31" />
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/7195222a-ae89-4aff-bc57-786a3bdc9f1a" />
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/fe9eb7ce-7fc5-4bea-91dc-431f1061915b" />
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f7e80d99-9d59-4f05-8b68-0517c0c30f68" />
