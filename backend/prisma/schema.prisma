@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  walletAddress String   @unique
+  role         UserRole  @default(FARMER)
+  createdAt    DateTime  @default(now())
+  invoices     Invoice[]
+}
+
+model Invoice {
+  id          String        @id @default(uuid())
+  ownerId     String
+  owner       User          @relation(fields: [ownerId], references: [id])
+  amount      Float
+  currency    String        @default("USDC")
+  expiresAt   DateTime
+  status      InvoiceStatus @default(PENDING)
+  contractId  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  funding     Funding?
+}
+
+model Funding {
+  id          String        @id @default(uuid())
+  invoiceId   String        @unique
+  invoice     Invoice       @relation(fields: [invoiceId], references: [id])
+  investorId  String
+  amount      Float
+  discountRate Float
+  status      FundingStatus @default(ACTIVE)
+  fundedAt    DateTime      @default(now())
+  settledAt   DateTime?
+}
+
+enum UserRole {
+  FARMER
+  INVESTOR
+  ADMIN
+}
+
+enum InvoiceStatus {
+  PENDING
+  FUNDED
+  SETTLED
+  EXPIRED
+}
+
+enum FundingStatus {
+  ACTIVE
+  SETTLED
+}
