@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("FARMER") // FARMER, INVESTOR, ADMIN
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  invoices  Invoice[]
+  notifications Notification[]
+}
+
+model Invoice {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  amount      Decimal  @db.Decimal(20, 8)
+  tokenType   String   // XLM, USDC, AQUA
+  status      String   @default("PENDING") // PENDING, FUNDED, REPAID, DEFAULTED
+  dueDate     DateTime
+  fundedAt    DateTime?
+  repaidAt    DateTime?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String   // INVOICE_DUE, PAYMENT_RECEIVED, etc.
+  title     String
+  message   String
+  metadata  Json?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}

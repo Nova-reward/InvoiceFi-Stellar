@@ -5,6 +5,7 @@ version: "3.9"
 #
 # Services:
 #   postgres          – PostgreSQL 15 database
+#   redis             – Redis for BullMQ job queue
 #   stellar-standalone – Stellar Quickstart (standalone / local network)
 #   backend           – NestJS API (port 4000)
 #   frontend          – Next.js 14 (port 3000)
@@ -41,6 +42,23 @@ services:
     networks:
       - invoicefi_net
 
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: invoicefi_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - invoicefi_net
+
   # ── Stellar Standalone Node ─────────────────────────────────────────────────
   stellar-standalone:
     image: stellar/quickstart:latest
@@ -73,6 +91,14 @@ services:
       STELLAR_RPC_URL:   http://stellar-standalone:8001
       HORIZON_URL:       http://stellar-standalone:8000
       PORT:              4000
+      REDIS_HOST:        redis
+      REDIS_PORT:        6379
+      SMTP_HOST:         ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT:         ${SMTP_PORT:-587}
+      SMTP_SECURE:       ${SMTP_SECURE:-false}
+      SMTP_USER:         ${SMTP_USER}
+      SMTP_PASSWORD:     ${SMTP_PASSWORD}
+      SMTP_FROM:         ${SMTP_FROM:-noreply@invoicefi.com}
     ports:
       - "4000:4000"
     depends_on:
@@ -114,6 +140,8 @@ services:
 # ─────────────────────────────────────────────────────────────────────────────
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
     driver: local
   stellar_data:
     driver: local
