@@ -1,0 +1,9 @@
+# Rust / Cargo build artifacts
+/target
+target/
+**/target/
+
+# Soroban test snapshots are regenerated on every `cargo test` run
+test_snapshots/
+
+# Local Cargo lock for the binary-less workspace is kept; nothing else here

@@ -1,56 +1,80 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { InvoiceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { SorobanService } from '../soroban/soroban.service';
-import { ContractError, ContractErrorCode } from '../common/contract-error';
-import { SettleInvoiceDto } from './dto/settlement.dto';
+
+export enum SettlementResult {
+  /** The invoice transitioned FUNDED -> REPAID. */
+  SETTLED = 'settled',
+  /** The invoice was already REPAID (event replayed / retried). */
+  ALREADY_REPAID = 'already_repaid',
+}
+
+/** The invoice referenced by an event is not (yet) mirrored in the database. */
+export class InvoiceNotFoundError extends Error {
+  constructor(invoiceId: string) {
+    super(`Invoice ${invoiceId} not found in database`);
+    this.name = 'InvoiceNotFoundError';
+  }
+}
+
+/** The invoice exists but is not in a settleable (FUNDED) state. */
+export class UnexpectedInvoiceStatusError extends Error {
+  constructor(invoiceId: string, status: InvoiceStatus) {
+    super(`Invoice ${invoiceId} is ${status}, expected FUNDED`);
+    this.name = 'UnexpectedInvoiceStatusError';
+  }
+}
 
 @Injectable()
 export class SettlementService {
-  constructor(private prisma: PrismaService, private soroban: SorobanService) {}
+  private readonly logger = new Logger(SettlementService.name);
 
-  async settle(callerId: string, callerWallet: string, dto: SettleInvoiceDto) {
-    const invoice = await this.prisma.invoice.findUnique({
-      where: { id: dto.invoiceId },
-      include: { funding: true },
-    });
+  constructor(private readonly prisma: PrismaService) {}
 
-    if (!invoice) throw new NotFoundException(`Invoice ${dto.invoiceId} not found`);
+  /**
+   * Apply an on-chain settlement to the database, transitioning the invoice
+   * from FUNDED to REPAID atomically.
+   *
+   * The write is a single conditional `updateMany` guarded on `status = FUNDED`,
+   * so concurrent calls cannot double-apply. The operation is idempotent: a
+   * replayed or retried event for an already-REPAID invoice resolves to
+   * {@link SettlementResult.ALREADY_REPAID} instead of erroring.
+   */
+  async settleInvoice(
+    invoiceId: string,
+    ledger: number,
+  ): Promise<SettlementResult> {
+    const onchainId = BigInt(invoiceId);
 
-    // Guard: already settled
-    if (invoice.status === 'SETTLED') {
-      throw new ContractError(ContractErrorCode.InvalidState, 'Invoice has already been settled');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.invoice.updateMany({
+        where: { onchainId, status: InvoiceStatus.FUNDED },
+        data: {
+          status: InvoiceStatus.REPAID,
+          settledLedger: ledger,
+          settledAt: new Date(),
+        },
+      });
 
-    // Guard: not funded yet
-    if (invoice.status !== 'FUNDED' || !invoice.funding) {
-      throw new ContractError(ContractErrorCode.InvalidState, 'Invoice must be in FUNDED state before settlement');
-    }
-
-    // Guard: only owner can settle
-    if (invoice.ownerId !== callerId) {
-      throw new ContractError(ContractErrorCode.Unauthorized, 'Only the invoice owner can trigger settlement');
-    }
-
-    // Invoke on-chain contract when contractId is present
-    if (invoice.contractId) {
-      try {
-        await this.soroban.settleInvoice({ invoiceContractId: invoice.contractId, callerWallet });
-      } catch (err) {
-        throw this.soroban.parseContractError((err as Error).message);
+      if (updated.count > 0) {
+        this.logger.log(
+          `Invoice ${invoiceId} settled (FUNDED -> REPAID) at ledger ${ledger}`,
+        );
+        return SettlementResult.SETTLED;
       }
-    }
 
-    const [funding] = await this.prisma.$transaction([
-      this.prisma.funding.update({
-        where: { id: invoice.funding.id },
-        data: { status: 'SETTLED', settledAt: new Date() },
-      }),
-      this.prisma.invoice.update({
-        where: { id: invoice.id },
-        data: { status: 'SETTLED' },
-      }),
-    ]);
-
-    return funding;
+      // No row moved — figure out why so the caller can decide on retries.
+      const existing = await tx.invoice.findUnique({ where: { onchainId } });
+      if (!existing) {
+        throw new InvoiceNotFoundError(invoiceId);
+      }
+      if (existing.status === InvoiceStatus.REPAID) {
+        this.logger.debug(
+          `Invoice ${invoiceId} already REPAID; skipping (idempotent).`,
+        );
+        return SettlementResult.ALREADY_REPAID;
+      }
+      throw new UnexpectedInvoiceStatusError(invoiceId, existing.status);
+    });
   }
 }

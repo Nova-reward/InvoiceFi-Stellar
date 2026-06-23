@@ -1,109 +1,86 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { NotFoundException } from '@nestjs/common';
-import { SettlementService } from './settlement.service';
+import { InvoiceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { SorobanService } from '../soroban/soroban.service';
-import { ContractError, ContractErrorCode } from '../common/contract-error';
+import {
+  InvoiceNotFoundError,
+  SettlementResult,
+  SettlementService,
+  UnexpectedInvoiceStatusError,
+} from './settlement.service';
 
-const makeFunding = () => ({ id: 'fund-1', invoiceId: 'inv-1', investorId: 'investor-1', amount: 4500 });
+interface TxMock {
+  invoice: {
+    updateMany: jest.Mock;
+    findUnique: jest.Mock;
+  };
+}
 
-const makeInvoice = (overrides: Partial<any> = {}) => ({
-  id: 'inv-1',
-  ownerId: 'user-1',
-  amount: 5000,
-  status: 'FUNDED',
-  contractId: null,
-  funding: makeFunding(),
-  ...overrides,
-});
+function buildPrisma(tx: TxMock): { prisma: PrismaService; tx: TxMock } {
+  const prisma = {
+    $transaction: jest.fn((cb: (t: TxMock) => unknown) => cb(tx)),
+  } as unknown as PrismaService;
+  return { prisma, tx };
+}
 
-describe('SettlementService – contract failure scenarios', () => {
-  let service: SettlementService;
-  let prisma: jest.Mocked<PrismaService>;
-  let soroban: jest.Mocked<SorobanService>;
+describe('SettlementService', () => {
+  const tx: TxMock = {
+    invoice: { updateMany: jest.fn(), findUnique: jest.fn() },
+  };
 
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        SettlementService,
-        {
-          provide: PrismaService,
-          useValue: {
-            invoice: { findUnique: jest.fn(), update: jest.fn() },
-            funding: { update: jest.fn() },
-            $transaction: jest.fn(),
-          },
-        },
-        {
-          provide: SorobanService,
-          useValue: {
-            settleInvoice: jest.fn(),
-            parseContractError: jest.fn((msg: string) => new ContractError(ContractErrorCode.Unauthorized, msg)),
-          },
-        },
-      ],
-    }).compile();
-
-    service = module.get(SettlementService);
-    prisma = module.get(PrismaService) as jest.Mocked<PrismaService>;
-    soroban = module.get(SorobanService) as jest.Mocked<SorobanService>;
+  beforeEach(() => {
+    tx.invoice.updateMany.mockReset();
+    tx.invoice.findUnique.mockReset();
   });
 
-  describe('InvalidState – already settled', () => {
-    it('throws ContractError(InvalidState) when invoice status is SETTLED', async () => {
-      (prisma.invoice.findUnique as jest.Mock).mockResolvedValue(
-        makeInvoice({ status: 'SETTLED', funding: makeFunding() }),
-      );
+  it('transitions FUNDED -> REPAID atomically and records ledger/time', async () => {
+    tx.invoice.updateMany.mockResolvedValue({ count: 1 });
+    const { prisma } = buildPrisma(tx);
+    const service = new SettlementService(prisma);
 
-      await expect(
-        service.settle('user-1', 'GABC', { invoiceId: 'inv-1' }),
-      ).rejects.toMatchObject({ code: ContractErrorCode.InvalidState });
+    const result = await service.settleInvoice('7', 4242);
+
+    expect(result).toBe(SettlementResult.SETTLED);
+    const args = tx.invoice.updateMany.mock.calls[0][0];
+    expect(args.where).toEqual({
+      onchainId: 7n,
+      status: InvoiceStatus.FUNDED,
     });
+    expect(args.data.status).toBe(InvoiceStatus.REPAID);
+    expect(args.data.settledLedger).toBe(4242);
+    expect(args.data.settledAt).toBeInstanceOf(Date);
+    // Never had to look the invoice up — the conditional update did the work.
+    expect(tx.invoice.findUnique).not.toHaveBeenCalled();
   });
 
-  describe('InvalidState – not funded', () => {
-    it('throws ContractError(InvalidState) when invoice is PENDING (not funded)', async () => {
-      (prisma.invoice.findUnique as jest.Mock).mockResolvedValue(
-        makeInvoice({ status: 'PENDING', funding: null }),
-      );
+  it('is idempotent when the invoice is already REPAID', async () => {
+    tx.invoice.updateMany.mockResolvedValue({ count: 0 });
+    tx.invoice.findUnique.mockResolvedValue({ status: InvoiceStatus.REPAID });
+    const { prisma } = buildPrisma(tx);
+    const service = new SettlementService(prisma);
 
-      await expect(
-        service.settle('user-1', 'GABC', { invoiceId: 'inv-1' }),
-      ).rejects.toMatchObject({ code: ContractErrorCode.InvalidState });
-    });
+    await expect(service.settleInvoice('7', 1)).resolves.toBe(
+      SettlementResult.ALREADY_REPAID,
+    );
   });
 
-  describe('Unauthorized settlement', () => {
-    it('throws ContractError(Unauthorized) when caller is not the invoice owner', async () => {
-      (prisma.invoice.findUnique as jest.Mock).mockResolvedValue(makeInvoice({ ownerId: 'user-1' }));
+  it('throws InvoiceNotFoundError when the invoice is absent', async () => {
+    tx.invoice.updateMany.mockResolvedValue({ count: 0 });
+    tx.invoice.findUnique.mockResolvedValue(null);
+    const { prisma } = buildPrisma(tx);
+    const service = new SettlementService(prisma);
 
-      await expect(
-        service.settle('different-user', 'GXYZ', { invoiceId: 'inv-1' }),
-      ).rejects.toMatchObject({ code: ContractErrorCode.Unauthorized });
-    });
-
-    it('re-throws Unauthorized ContractError from Soroban RPC', async () => {
-      (prisma.invoice.findUnique as jest.Mock).mockResolvedValue(
-        makeInvoice({ ownerId: 'user-1', contractId: 'CONTRACT-ABC' }),
-      );
-      (soroban.settleInvoice as jest.Mock).mockRejectedValue(new Error('Unauthorized'));
-      (soroban.parseContractError as jest.Mock).mockReturnValue(
-        new ContractError(ContractErrorCode.Unauthorized, 'Caller is not authorized'),
-      );
-
-      await expect(
-        service.settle('user-1', 'GABC', { invoiceId: 'inv-1' }),
-      ).rejects.toMatchObject({ code: ContractErrorCode.Unauthorized });
-    });
+    await expect(service.settleInvoice('7', 1)).rejects.toBeInstanceOf(
+      InvoiceNotFoundError,
+    );
   });
 
-  describe('Invoice not found', () => {
-    it('throws NotFoundException when invoice does not exist', async () => {
-      (prisma.invoice.findUnique as jest.Mock).mockResolvedValue(null);
+  it('throws UnexpectedInvoiceStatusError for a non-FUNDED invoice', async () => {
+    tx.invoice.updateMany.mockResolvedValue({ count: 0 });
+    tx.invoice.findUnique.mockResolvedValue({ status: InvoiceStatus.PENDING });
+    const { prisma } = buildPrisma(tx);
+    const service = new SettlementService(prisma);
 
-      await expect(
-        service.settle('user-1', 'GABC', { invoiceId: 'missing' }),
-      ).rejects.toBeInstanceOf(NotFoundException);
-    });
+    await expect(service.settleInvoice('7', 1)).rejects.toBeInstanceOf(
+      UnexpectedInvoiceStatusError,
+    );
   });
 });
