@@ -1,693 +1,316 @@
-pub mod error;
-pub mod types;
+#![no_std]
+//! Liquidity / financing pool contract.
+//!
+//! Investors (liquidity providers) deposit settlement tokens into the pool.
+//! The pool advances discounted working capital against harvest invoices: a
+//! farmer is credited `face_value - discount` up front, and the pool keeps the
+//! discount as yield once the invoice settles.
+//!
+//! Balances are tracked as internal ledger claims rather than moving an
+//! external token, keeping the financing logic self-contained and unit
+//! testable. A production deployment would settle these claims through a
+//! SEP-41 token contract in the settlement layer.
 
-pub use error::{FinancingPoolError, DepositStatus, DepositType, InvestmentStatus};
-pub use types::{DepositData, CertificateData, InvestmentRequestData, StorageKey, PoolBalance};
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env,
+};
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
-
-use crate::error::FinancingPoolError;
-use crate::types::StorageKey;
-
-pub trait FinancingPoolTrait {
-    fn init(e: Env, admin: Address);
-    fn get_admin(e: Env) -> Option<Address>;
-    fn is_approved_investor(e: Env, addr: Address) -> bool;
-    fn approve_investor(e: Env, caller: Address, addr: Address);
-    fn reject_investor(e: Env, caller: Address, addr: Address);
-    fn get_investor_status(e: Env, addr: Address) -> Option<u32>;
-    fn get_pool_balance(e: Env) -> Option<i128>;
-    fn get_deposit_balance(e: Env, dep_key: Symbol) -> Option<i128>;
-    fn get_deposit_status(e: Env, dep_key: Symbol) -> Option<u32>;
-    fn get_certificate_status(e: Env, cert_key: Symbol) -> Option<u32>;
-    fn get_investment_amount(e: Env, inv_key: Symbol) -> Option<i128>;
-    fn get_investment_status(e: Env, inv_key: Symbol) -> Option<u32>;
-    fn list_approved_investors(e: Env) -> soroban_sdk::Vec<Address>;
-    fn list_user_deposits(e: Env, addr: Address) -> soroban_sdk::Vec<Symbol>;
-    fn list_user_cad(e: Env, addr: Address) -> soroban_sdk::Vec<Symbol>;
-    fn list_open_funding_requests(e: Env) -> soroban_sdk::Vec<Symbol>;
-
-    fn set_approved_investors(e: Env, caller: Address, investors: soroban_sdk::Vec<Address>);
-
-    fn issue_deposit(
-        e: Env,
-        caller: Address,
-        dep_key: Symbol,
-        amount: i128,
-        deposit_type: u32,
-        memo: Symbol,
-        InvestNow: bool,
-    );
-
-    fn close_deposit(e: Env, caller: Address, dep_key: Symbol);
-    fn issue_certificate_against_deposit(
-        e: Env,
-        caller: Address,
-        cert_key: Symbol,
-        dep_key: Symbol,
-        amount: i128,
-        certificate_type: u32,
-        payable_amount: i128,
-        payment_due_date: u64,
-        pool_invest_nonce: u64,
-        interest_rate: u32,
-        approval_status: u32,
-    );
-
-    fn request_investment_withdrawal(e: Env, caller: Address, cert_key: Symbol);
-    fn approve_investment_withdrawal(e: Env, caller: Address, cad_key: Symbol);
-    fn reject_investment_withdrawal(e: Env, caller: Address, cad_key: Symbol);
-    fn release_investment(e: Env, caller: Address, inv_key: Symbol);
-
-    fn fund_invoice_request(
-        e: Env,
-        caller: Address,
-        inv_key: Symbol,
-        invoice_id: Symbol,
-        amount: i128,
-    );
-
-    fn accept_funding(e: Env, caller: Address, inv_key: Symbol);
-    fn reject_funding(e: Env, caller: Address, inv_key: Symbol);
-
-    fn release_from_reserve(e: Env, caller: Address, cert_key: Symbol);
-    fn transfer_from_reserve(e: Env, caller: Address, dest: Address, amount: i128);
-    fn increment_wallet(e: Env, caller: Address, addr: Address, amount: i128);
-    fn transfer_deposit(e: Env, caller: Address, from: Address, to: Address, amount: i128);
-    fn approve_fund_request(e: Env, caller: Address, req_key: Symbol);
-    fn set_role(e: Env, caller: Address, addr: Address, role: u32);
-    fn check_status(e: Env, caller: Address, key: Symbol);
-    fn transfer_admin(e: Env, caller: Address, new_admin: Address);
-    fn update_settings(
-        e: Env,
-        caller: Address,
-        min_deposit_amount: i128,
-        max_deposit_amount: i128,
-        fee_rate_bips: u32,
-    );
+/// Record of capital advanced against a single invoice.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Funding {
+    pub invoice_id: u64,
+    /// Full invoice face value.
+    pub face_value: i128,
+    /// Amount actually advanced to the recipient (face value minus discount).
+    pub advance: i128,
+    /// Address credited with the advance (typically the invoice owner).
+    pub recipient: Address,
 }
+
+/// Emitted when an LP deposits liquidity.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deposited {
+    #[topic]
+    pub from: Address,
+    pub amount: i128,
+}
+
+/// Emitted when a claim is withdrawn.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Withdrawn {
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an invoice is funded.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Funded {
+    #[topic]
+    pub recipient: Address,
+    #[topic]
+    pub invoice_id: u64,
+    pub face_value: i128,
+    pub advance: i128,
+}
+
+#[contracttype]
+enum DataKey {
+    Admin,
+    /// Discount applied on funding, in basis points (1/100th of a percent).
+    DiscountBps,
+    /// Un-deployed liquidity currently held by the pool.
+    Available,
+    /// Withdrawable claim for an address (LP capital + advanced funds).
+    Balance(Address),
+    /// Funding record keyed by invoice id.
+    Funding(u64),
+}
+
+#[contracterror]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    AlreadyInitialized = 1,
+    NotInitialized = 2,
+    InvalidAmount = 3,
+    InvalidDiscount = 4,
+    InsufficientBalance = 5,
+    InsufficientLiquidity = 6,
+    AlreadyFunded = 7,
+    FundingNotFound = 8,
+}
+
+const BPS_DENOMINATOR: i128 = 10_000;
 
 #[contract]
 pub struct FinancingPoolContract;
 
 #[contractimpl]
-impl FinancingPoolTrait for FinancingPoolContract {
-    fn init(e: Env, admin: Address) {
+impl FinancingPoolContract {
+    /// One-time initialization.
+    ///
+    /// `discount_bps` is the funding discount in basis points and must be
+    /// strictly less than 10_000 (100%).
+    pub fn initialize(env: Env, admin: Address, discount_bps: u32) -> Result<(), Error> {
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::AlreadyInitialized);
+        }
+        if discount_bps as i128 >= BPS_DENOMINATOR {
+            return Err(Error::InvalidDiscount);
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::DiscountBps, &discount_bps);
+        env.storage().instance().set(&DataKey::Available, &0i128);
+        Ok(())
+    }
+
+    /// Deposit liquidity into the pool. Requires `from` authorization.
+    pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        from.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let balance = Self::balance_inner(&env, &from) + amount;
+        Self::set_balance(&env, &from, balance);
+        Self::set_available(&env, Self::available_inner(&env) + amount);
+
+        Deposited { from, amount }.publish(&env);
+        Ok(())
+    }
+
+    /// Withdraw a withdrawable claim. Requires `to` authorization.
+    ///
+    /// Fails if the caller's claim is too small, or if the pool's un-deployed
+    /// liquidity is insufficient (capital locked in active fundings).
+    pub fn withdraw(env: Env, to: Address, amount: i128) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        to.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let balance = Self::balance_inner(&env, &to);
+        if balance < amount {
+            return Err(Error::InsufficientBalance);
+        }
+        let available = Self::available_inner(&env);
+        if available < amount {
+            return Err(Error::InsufficientLiquidity);
+        }
+
+        Self::set_balance(&env, &to, balance - amount);
+        Self::set_available(&env, available - amount);
+
+        Withdrawn { to, amount }.publish(&env);
+        Ok(())
+    }
+
+    /// Advance discounted capital against an invoice. Admin-only.
+    ///
+    /// Credits `recipient` with `face_value - discount` and records the
+    /// funding. Rejects zero/negative face values, invoices already funded,
+    /// and requests that exceed available liquidity. Returns the advance.
+    pub fn fund_invoice(
+        env: Env,
+        invoice_id: u64,
+        face_value: i128,
+        recipient: Address,
+    ) -> Result<i128, Error> {
+        let admin = Self::admin_inner(&env)?;
         admin.require_auth();
-        let k = StorageKey::instance("ADMIN");
-        e.storage().instance().set(&k, &admin);
-        let bk = StorageKey::instance("POOL_BALANCE");
-        e.storage().instance().set(&bk, &0i128);
-    }
 
-    fn get_admin(e: Env) -> Option<Address> {
-        e.storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-    }
-
-    fn is_approved_investor(e: Env, addr: Address) -> bool {
-        let k = StorageKey::investor_status(&addr);
-        e.storage().persistent().get(&k) == Some(2)
-    }
-
-    fn approve_investor(e: Env, caller: Address, addr: Address) {
-        caller.require_auth();
-
-        let admin: Address = e
+        if face_value <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if env
             .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
+            .persistent()
+            .has(&DataKey::Funding(invoice_id))
+        {
+            return Err(Error::AlreadyFunded);
         }
 
-        let k = StorageKey::investor_status(&addr);
-        e.storage().persistent().set(&k, &2u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "investor_approved")),
-            (addr,),
-        );
-    }
-
-    fn reject_investor(e: Env, caller: Address, addr: Address) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
+        let advance = Self::advance_for(&env, face_value);
+        let available = Self::available_inner(&env);
+        if available < advance {
+            return Err(Error::InsufficientLiquidity);
         }
 
-        let k = StorageKey::investor_status(&addr);
-        e.storage().persistent().set(&k, &0u32);
+        Self::set_available(&env, available - advance);
+        let recipient_balance = Self::balance_inner(&env, &recipient) + advance;
+        Self::set_balance(&env, &recipient, recipient_balance);
 
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "investor_rejected")),
-            (addr,),
-        );
-    }
-
-    fn get_investor_status(e: Env, addr: Address) -> Option<u32> {
-        e.storage()
+        let funding = Funding {
+            invoice_id,
+            face_value,
+            advance,
+            recipient: recipient.clone(),
+        };
+        env.storage()
             .persistent()
-            .get(&StorageKey::investor_status(&addr))
-    }
+            .set(&DataKey::Funding(invoice_id), &funding);
 
-    fn get_pool_balance(e: Env) -> Option<i128> {
-        e.storage()
-            .instance()
-            .get(&StorageKey::instance("POOL_BALANCE"))
-    }
-
-    fn get_deposit_balance(e: Env, dep_key: Symbol) -> Option<i128> {
-        e.storage()
-            .persistent()
-            .get(&StorageKey::deposit_balance(&dep_key))
-    }
-
-    fn get_deposit_status(e: Env, dep_key: Symbol) -> Option<u32> {
-        e.storage()
-            .persistent()
-            .get(&StorageKey::deposit_status(&dep_key))
-    }
-
-    fn get_certificate_status(e: Env, cert_key: Symbol) -> Option<u32> {
-        e.storage()
-            .persistent()
-            .get(&StorageKey::cert_status(&cert_key))
-    }
-
-    fn get_investment_amount(e: Env, inv_key: Symbol) -> Option<i128> {
-        e.storage()
-            .persistent()
-            .get(&StorageKey::investment_amount(&inv_key))
-    }
-
-    fn get_investment_status(e: Env, inv_key: Symbol) -> Option<u32> {
-        e.storage()
-            .persistent()
-            .get(&StorageKey::investment_status(&inv_key))
-    }
-
-    fn list_approved_investors(e: Env) -> soroban_sdk::Vec<Address> {
-        soroban_sdk::Vec::new(&e)
-    }
-
-    fn list_user_deposits(e: Env, addr: Address) -> soroban_sdk::Vec<Symbol> {
-        soroban_sdk::Vec::new(&e)
-    }
-
-    fn list_user_cad(e: Env, addr: Address) -> soroban_sdk::Vec<Symbol> {
-        soroban_sdk::Vec::new(&e)
-    }
-
-    fn list_open_funding_requests(e: Env) -> soroban_sdk::Vec<Symbol> {
-        soroban_sdk::Vec::new(&e)
-    }
-
-    fn set_approved_investors(
-        e: Env,
-        caller: Address,
-        _investors: soroban_sdk::Vec<Address>,
-    ) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
+        Funded {
+            recipient,
+            invoice_id,
+            face_value,
+            advance,
         }
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "investors_set")),
-            (),
-        );
+        .publish(&env);
+        Ok(advance)
     }
 
-    fn issue_deposit(
-        e: Env,
-        caller: Address,
-        dep_key: Symbol,
-        amount: i128,
-        deposit_type: u32,
-        _memo: Symbol,
-        _InvestNow: bool,
-    ) {
-        caller.require_auth();
+    // ---- read-only views -------------------------------------------------
 
-        let status: u32 = e
-            .storage()
+    /// Quote the advance payable for a given face value at the current
+    /// discount, without funding anything.
+    pub fn quote(env: Env, face_value: i128) -> Result<i128, Error> {
+        if face_value <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        Ok(Self::advance_for(&env, face_value))
+    }
+
+    /// Discount (in tokens) that would be retained on a given face value.
+    pub fn discount_amount(env: Env, face_value: i128) -> Result<i128, Error> {
+        if face_value <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        Ok(face_value - Self::advance_for(&env, face_value))
+    }
+
+    pub fn balance_of(env: Env, addr: Address) -> i128 {
+        Self::balance_inner(&env, &addr)
+    }
+
+    pub fn available_liquidity(env: Env) -> i128 {
+        Self::available_inner(&env)
+    }
+
+    pub fn discount_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DiscountBps)
+            .unwrap_or(0)
+    }
+
+    pub fn get_funding(env: Env, invoice_id: u64) -> Result<Funding, Error> {
+        env.storage()
             .persistent()
-            .get(&StorageKey::investor_status(&caller))
+            .get(&DataKey::Funding(invoice_id))
+            .ok_or(Error::FundingNotFound)
+    }
+
+    pub fn is_funded(env: Env, invoice_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Funding(invoice_id))
+    }
+
+    pub fn admin(env: Env) -> Result<Address, Error> {
+        Self::admin_inner(&env)
+    }
+
+    // ---- internals -------------------------------------------------------
+
+    fn advance_for(env: &Env, face_value: i128) -> i128 {
+        let bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DiscountBps)
             .unwrap_or(0);
+        // Floor division: any rounding loss is retained by the pool as extra
+        // discount, never over-advanced to the recipient.
+        face_value * (BPS_DENOMINATOR - bps as i128) / BPS_DENOMINATOR
+    }
 
-        if status != 2 {
-            panic!("Err: NOT_APPROVED_INVESTOR");
-        }
+    fn balance_inner(env: &Env, addr: &Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(addr.clone()))
+            .unwrap_or(0)
+    }
 
-        if amount <= 0 {
-            panic!("Err: INVALID_AMOUNT");
-        }
+    fn set_balance(env: &Env, addr: &Address, amount: i128) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(addr.clone()), &amount);
+    }
 
-        let pb: i128 = e
-            .storage()
+    fn available_inner(env: &Env) -> i128 {
+        env.storage()
             .instance()
-            .get(&StorageKey::instance("POOL_BALANCE"))
-            .unwrap_or(0);
-        let new_bal = pb + amount;
-        e.storage()
+            .get(&DataKey::Available)
+            .unwrap_or(0)
+    }
+
+    fn set_available(env: &Env, amount: i128) {
+        env.storage().instance().set(&DataKey::Available, &amount);
+    }
+
+    fn admin_inner(env: &Env) -> Result<Address, Error> {
+        env.storage()
             .instance()
-            .set(&StorageKey::instance("POOL_BALANCE"), &new_bal);
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::deposit_balance(&dep_key), &amount);
-        e.storage()
-            .persistent()
-            .set(&StorageKey::deposit_status(&dep_key), &2u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "deposit_issued")),
-            (dep_key, caller, amount, deposit_type),
-        );
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
     }
 
-    fn close_deposit(e: Env, caller: Address, dep_key: Symbol) {
-        caller.require_auth();
-
-        let status: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::deposit_status(&dep_key))
-            .unwrap_or(0);
-
-        if status != 2 {
-            panic!("Err: INVALID_STATUS");
+    fn require_initialized(env: &Env) -> Result<(), Error> {
+        if env.storage().instance().has(&DataKey::Admin) {
+            Ok(())
+        } else {
+            Err(Error::NotInitialized)
         }
-
-        let amount: i128 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::deposit_balance(&dep_key))
-            .unwrap_or(0);
-
-        let pb: i128 = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("POOL_BALANCE"))
-            .unwrap_or(0);
-        let new_bal = pb.saturating_sub(amount);
-        e.storage()
-            .instance()
-            .set(&StorageKey::instance("POOL_BALANCE"), &new_bal);
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::deposit_status(&dep_key), &3u32);
-
-        let cert_k = StorageKey::cert_status(&dep_key);
-        e.storage().persistent().set(&cert_k, &3u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "deposit_closed")),
-            (dep_key, caller, amount),
-        );
-    }
-
-    fn issue_certificate_against_deposit(
-        e: Env,
-        caller: Address,
-        cert_key: Symbol,
-        dep_key: Symbol,
-        amount: i128,
-        _certificate_type: u32,
-        _payable_amount: i128,
-        _payment_due_date: u64,
-        _pool_invest_nonce: u64,
-        _interest_rate: u32,
-        _approval_status: u32,
-    ) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        let dep_status: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::deposit_status(&dep_key))
-            .unwrap_or(0);
-
-        if dep_status != 2 {
-            panic!("Err: INVALID_DEPOSIT");
-        }
-
-        let dep_balance: i128 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::deposit_balance(&dep_key))
-            .unwrap_or(0);
-
-        if amount > dep_balance {
-            panic!("Err: INSUFFICIENT");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::cert_status(&cert_key), &2u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "cert_issued")),
-            (cert_key, dep_key, amount),
-        );
-    }
-
-    fn request_investment_withdrawal(e: Env, caller: Address, cert_key: Symbol) {
-        caller.require_auth();
-
-        let status: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::cert_status(&cert_key))
-            .unwrap_or(0);
-
-        if status != 2 {
-            panic!("Err: INVALID_STATUS");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::cert_status(&cert_key), &4u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "withdrawal_req")),
-            (cert_key, caller),
-        );
-    }
-
-    fn approve_investment_withdrawal(e: Env, caller: Address, cert_key: Symbol) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::cert_status(&cert_key), &5u32);
-
-        let pb: i128 = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("POOL_BALANCE"))
-            .unwrap_or(0);
-        e.storage()
-            .instance()
-            .set(&StorageKey::instance("POOL_BALANCE"), &pb);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "withdrawal_approved")),
-            (cert_key,),
-        );
-    }
-
-    fn reject_investment_withdrawal(e: Env, caller: Address, cert_key: Symbol) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::cert_status(&cert_key), &6u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "withdrawal_rejected")),
-            (cert_key,),
-        );
-    }
-
-    fn release_investment(e: Env, caller: Address, inv_key: Symbol) {
-        caller.require_auth();
-
-        let status: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::investment_status(&inv_key))
-            .unwrap_or(0);
-
-        if status != 2 {
-            panic!("Err: INVALID_STATUS");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::investment_status(&inv_key), &3u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "investment_released")),
-            (inv_key, caller),
-        );
-    }
-
-    fn fund_invoice_request(
-        e: Env,
-        caller: Address,
-        inv_key: Symbol,
-        invoice_id: Symbol,
-        amount: i128,
-    ) {
-        caller.require_auth();
-
-        let inv_status: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::investment_status(&inv_key))
-            .unwrap_or(0);
-
-        if inv_status != 1 {
-            panic!("Err: INVALID_STATUS");
-        }
-
-        if amount <= 0 {
-            panic!("Err: INVALID_AMOUNT");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::investment_amount(&inv_key), &amount);
-        e.storage()
-            .persistent()
-            .set(&StorageKey::investment_status(&inv_key), &2u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "invoice_funded")),
-            (inv_key, invoice_id, caller, amount),
-        );
-    }
-
-    fn accept_funding(e: Env, caller: Address, inv_key: Symbol) {
-        caller.require_auth();
-        e.storage()
-            .persistent()
-            .set(&StorageKey::investment_status(&inv_key), &7u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "funding_accepted")),
-            (inv_key, caller),
-        );
-    }
-
-    fn reject_funding(e: Env, caller: Address, inv_key: Symbol) {
-        caller.require_auth();
-        e.storage()
-            .persistent()
-            .set(&StorageKey::investment_status(&inv_key), &8u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "funding_rejected")),
-            (inv_key, caller),
-        );
-    }
-
-    fn release_from_reserve(e: Env, caller: Address, cert_key: Symbol) {
-        caller.require_auth();
-
-        let status: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::cert_status(&cert_key))
-            .unwrap_or(0);
-        if status != 3 {
-            panic!("Err: INVALID_STATUS");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::cert_status(&cert_key), &9u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "reserve_released")),
-            (cert_key, caller),
-        );
-    }
-
-    fn transfer_from_reserve(e: Env, _caller: Address, _dest: Address, _amount: i128) {
-        panic!("Err: USE_STANDARD_TRANSFER");
-    }
-
-    fn increment_wallet(e: Env, caller: Address, _addr: Address, _amount: i128) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "wallet_incremented")),
-            (),
-        );
-    }
-
-    fn transfer_deposit(
-        e: Env,
-        _caller: Address,
-        _from: Address,
-        _to: Address,
-        _amount: i128,
-    ) {
-        panic!("Err: USE_STANDARD_TRANSFER");
-    }
-
-    fn approve_fund_request(e: Env, caller: Address, req_key: Symbol) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::fund_req_status(&req_key), &2u32);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "fund_approved")),
-            (req_key,),
-        );
-    }
-
-    fn set_role(e: Env, caller: Address, addr: Address, role: u32) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::investor_status(&addr), &role);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "role_set")),
-            (addr, role),
-        );
-    }
-
-    fn check_status(e: Env, _caller: Address, key: Symbol) {
-        let _s: u32 = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::deposit_status(&key))
-            .unwrap_or(0);
-    }
-
-    fn transfer_admin(e: Env, caller: Address, new_admin: Address) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.storage()
-            .instance()
-            .set(&StorageKey::instance("ADMIN"), &new_admin);
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "admin_transferred")),
-            (new_admin,),
-        );
-    }
-
-    fn update_settings(
-        e: Env,
-        caller: Address,
-        _min: i128,
-        _max: i128,
-        _fee_bips: u32,
-    ) {
-        caller.require_auth();
-
-        let admin: Address = e
-            .storage()
-            .instance()
-            .get(&StorageKey::instance("ADMIN"))
-            .expect("not initialized");
-        if caller != admin {
-            panic!("Err: NOT_ADMIN");
-        }
-
-        e.events().publish(
-            (Symbol::new(&e, "pool"), Symbol::new(&e, "settings_updated")),
-            (),
-        );
     }
 }
 
 #[cfg(test)]
-pub mod tests;
+mod test;
