@@ -221,6 +221,16 @@ AgroLedger/
 3. Commit your changes  
 4. Push and open a Pull Request  
 
+## CI / Branch Protection
+
+GitHub Actions runs on pull requests targeting `main` and `develop` and must pass these required checks before merge:
+
+1. `contract-build-test`
+2. `backend-test`
+3. `frontend-lint`
+
+Configure branch protection for `main` and `develop` to require all three checks and to block merges until they succeed.
+
 ---
 
 ## License
