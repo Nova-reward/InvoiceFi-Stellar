@@ -1,0 +1,65 @@
+use soroban_sdk::{Address, Env, Symbol, Vec};
+
+#[derive(Clone, Debug)]
+pub struct InvoiceRecord {
+    pub id: Symbol,
+    pub borrower: Address,
+    pub financier: Address,
+    pub amount: i128,
+    pub due_date: u64,
+    pub principal_paid: i128,
+    pub interest_paid: i128,
+    pub status: u32,
+    pub lender_approved: bool,
+    pub payer_approved: bool,
+    pub is_funded: bool,
+    pub lender_allowed: bool,
+    pub payer_allowed: bool,
+    pub approval_status: u32,
+}
+
+/// Nonce metadata stored per invoice.
+/// A nonce is valid only before due_date + 30 days (2592000 seconds) and
+/// only if it has not been previously accepted.
+#[derive(Clone, Debug)]
+pub struct NonceMeta {
+    pub invoice_id: Symbol,
+    pub used_nonces: Vec<u64>,
+    pub due_date: u64,
+}
+
+impl NonceMeta {
+    pub fn new(invoice_id: Symbol, due_date: u64) -> Self {
+        NonceMeta {
+            invoice_id,
+            used_nonces: Vec::new(&Env::default()),
+            due_date,
+        }
+    }
+
+    pub fn load(e: &Env, invoice_id: &Symbol) -> Self {
+        let key = StorageKey::nonce_meta(invoice_id);
+        if let Some(meta) = e.storage().persistent().get(&key) {
+            return meta;
+        }
+        NonceMeta::new(invoice_id.clone(), 0)
+    }
+
+    pub fn mark_used(&mut self, _e: &Env, nonce: u64) {
+        self.used_nonces.push_back(nonce);
+    }
+
+    /// Returns true if the nonce has not been used AND is still within the
+    /// 30-day post-due-date validity window.
+    pub fn is_valid(&self, _e: &Env, nonce: u64) -> bool {
+        if self.used_nonces.contains(&nonce) {
+            return false;
+        }
+        let deadline = self.due_date.saturating_add(2592000);
+        let now: u64 = _e.ledger().timestamp();
+        now <= deadline
+    }
+}
+
+// Type alias kept for backward compatibility
+pub type SettlementNonce = NonceMeta;
