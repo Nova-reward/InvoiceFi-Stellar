@@ -6,31 +6,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "jest --forceExit"
+    "lint": "next lint"
   },
   "dependencies": {
-    "next": "14.2.30",
+    "next": "14.2.5",
     "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "socket.io-client": "4.8.1"
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@testing-library/react": "14.3.1",
-    "@testing-library/jest-dom": "6.6.3",
-    "@types/node": "20.17.57",
-    "@types/react": "18.3.23",
-    "jest": "29.7.0",
-    "jest-environment-jsdom": "29.7.0",
-    "ts-jest": "29.3.4",
-    "typescript": "5.8.3"
-  },
-  "jest": {
-    "testEnvironment": "jsdom",
-    "transform": {
-      "^.+\\.(t|j)sx?$": ["ts-jest", { "tsconfig": { "jsx": "react" } }]
-    },
-    "moduleFileExtensions": ["ts", "tsx", "js", "jsx", "json"],
-    "testRegex": ".*\\.spec\\.(ts|tsx)$",
-    "testPathIgnorePatterns": ["/node_modules/", "/.next/"]
+    "@types/node": "20.14.2",
+    "@types/react": "18.3.5",
+    "@types/react-dom": "18.3.2",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.5",
+    "typescript": "5.5.4"
   }
 }
