@@ -1,3 +1,4 @@
+// Prisma schema for the InvoiceFi-Stellar backend.
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,40 +8,38 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  name      String?
-  role      String   @default("FARMER") // FARMER, INVESTOR, ADMIN
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  invoices  Invoice[]
-  notifications Notification[]
+enum InvoiceStatus {
+  PENDING
+  FUNDED
+  REPAID
+  DEFAULTED
 }
 
+/// Off-chain mirror of an on-chain invoice. `onchainId` is the invoice id
+/// allocated by the Soroban invoice contract and is the join key used by the
+/// settlement event listener.
 model Invoice {
-  id          String   @id @default(uuid())
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
-  amount      Decimal  @db.Decimal(20, 8)
-  tokenType   String   // XLM, USDC, AQUA
-  status      String   @default("PENDING") // PENDING, FUNDED, REPAID, DEFAULTED
-  dueDate     DateTime
-  fundedAt    DateTime?
-  repaidAt    DateTime?
-  metadata    Json?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           Int           @id @default(autoincrement())
+  onchainId    BigInt        @unique
+  status       InvoiceStatus @default(PENDING)
+  faceValue    BigInt
+  farmer       String
+  investor     String?
+  /// Ledger sequence in which the on-chain settlement was observed.
+  settledLedger Int?
+  settledAt    DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([status])
+  @@index([farmer])
+  @@index([investor])
 }
 
-model Notification {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  type      String   // INVOICE_DUE, PAYMENT_RECEIVED, etc.
-  title     String
-  message   String
-  metadata  Json?
-  read      Boolean  @default(false)
-  createdAt DateTime @default(now())
+/// Singleton row tracking the last Soroban ledger the event listener has
+/// processed, so polling resumes from the correct cursor after a restart.
+model SyncCursor {
+  id         Int      @id @default(1)
+  lastLedger Int      @default(0)
+  updatedAt  DateTime @updatedAt
 }

@@ -1,0 +1,56 @@
+name: Soroban Contract CI
+
+on:
+  push:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/soroban-ci.yml"
+  pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/soroban-ci.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        working-directory: contracts
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: contracts
+        run: cargo clippy --all-targets --all-features
+
+      - name: Run tests
+        working-directory: contracts
+        run: cargo test --all
+
+      - name: Build WASM release
+        working-directory: contracts
+        run: cargo build --release --target wasm32-unknown-unknown

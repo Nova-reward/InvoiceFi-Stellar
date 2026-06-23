@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "invoice",
+    "financing-pool",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Christopherdominic/InvoiceFi-Stellar"
+
+[workspace.dependencies]
+soroban-sdk = "26.1.0"
+
+# Release profile tuned for small, deterministic Wasm output.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# `release-with-logs` keeps the diagnostic events emitted by `log!`/`panic!`
+# so contract errors are readable while debugging on a sandbox network.
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
