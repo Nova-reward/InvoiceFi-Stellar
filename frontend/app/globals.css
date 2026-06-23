@@ -1,0 +1,197 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #111827;
+  background: #f9fafb;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #f3f4f6;
+}
+
+.page-shell {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+.page-header {
+  margin-bottom: 24px;
+}
+
+.page-header h1 {
+  margin: 0 0 8px;
+  font-size: clamp(2rem, 2.5vw, 3rem);
+}
+
+.page-header p {
+  margin: 0;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+.investor-table-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+  padding: 24px;
+}
+
+.table-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.filter-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.95rem;
+  color: #374151;
+}
+
+.filter-group select {
+  min-width: 120px;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #111827;
+}
+
+.summary-text {
+  color: #6b7280;
+  align-self: center;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 840px;
+}
+
+th,
+td {
+  padding: 16px 14px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+th {
+  color: #374151;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.sortable span {
+  margin-left: 6px;
+  font-size: 0.8rem;
+}
+
+tbody tr:hover {
+  background: #f9fafb;
+}
+
+td {
+  font-size: 0.95rem;
+  color: #1f2937;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.status-funded {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.status-repaid {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-defaulted {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.pagination-controls button {
+  padding: 10px 16px;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #111827;
+  cursor: pointer;
+  min-width: 110px;
+}
+
+.pagination-controls button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.empty-state {
+  padding: 48px 28px;
+  text-align: center;
+  background: #ffffff;
+  border: 1px dashed #d1d5db;
+  border-radius: 20px;
+}
+
+.empty-state h2 {
+  margin: 0 0 12px;
+  font-size: 1.75rem;
+}
+
+.empty-state p {
+  margin: 0 0 24px;
+  color: #4b5563;
+}
+
+.cta-button {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 999px;
+  background: #4f46e5;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
