@@ -19,14 +19,24 @@ fn setup() -> Harness {
     Harness { env, client, admin }
 }
 
+const DUE_DATE: u64 = 1_900_000_000;
+const DISCOUNT_RATE: u32 = 1_000; // 10%
+
 fn mint_default(h: &Harness, owner: &Address) -> u64 {
     h.client.mint(
         owner,
         &1_000i128,
         &symbol_short!("MAIZE"),
-        &1_900_000_000u64,
+        &DUE_DATE,
         &String::from_str(&h.env, "ipfs://valuation"),
     )
+}
+
+/// Mint then fund (tokenize) an invoice, returning its id.
+fn mint_and_fund(h: &Harness, owner: &Address) -> u64 {
+    let id = mint_default(h, owner);
+    h.client.fund(&id, &DISCOUNT_RATE);
+    id
 }
 
 // ---- initialization --------------------------------------------------------
@@ -199,7 +209,7 @@ fn full_lifecycle_pending_funded_settled() {
     let id = mint_default(&h, &owner);
 
     assert_eq!(h.client.status_of(&id), Status::Pending);
-    h.client.update_status(&id, &Status::Funded);
+    h.client.fund(&id, &DISCOUNT_RATE);
     assert_eq!(h.client.status_of(&id), Status::Funded);
     h.client.update_status(&id, &Status::Settled);
     assert_eq!(h.client.status_of(&id), Status::Settled);
@@ -219,7 +229,7 @@ fn funded_can_default() {
     let h = setup();
     let owner = Address::generate(&h.env);
     let id = mint_default(&h, &owner);
-    h.client.update_status(&id, &Status::Funded);
+    h.client.fund(&id, &DISCOUNT_RATE);
     h.client.update_status(&id, &Status::Defaulted);
     assert_eq!(h.client.status_of(&id), Status::Defaulted);
 }
@@ -240,7 +250,7 @@ fn terminal_settled_is_immutable() {
     let h = setup();
     let owner = Address::generate(&h.env);
     let id = mint_default(&h, &owner);
-    h.client.update_status(&id, &Status::Funded);
+    h.client.fund(&id, &DISCOUNT_RATE);
     h.client.update_status(&id, &Status::Settled);
     assert_eq!(
         h.client.try_update_status(&id, &Status::Funded),
@@ -258,8 +268,8 @@ fn status_update_requires_admin_auth() {
     let owner = Address::generate(&h.env);
     let id = mint_default(&h, &owner);
 
-    h.client.update_status(&id, &Status::Funded);
-    // The most recent status change must have been authorized by the admin.
+    h.client.update_status(&id, &Status::Defaulted);
+    // The status change must have been authorized by the admin.
     let auths = h.env.auths();
     assert_eq!(auths.first().unwrap().0, h.admin);
 }
@@ -282,4 +292,258 @@ fn get_missing_invoice_fails() {
         h.client.try_get_invoice(&42u64),
         Err(Ok(Error::InvoiceNotFound))
     );
+}
+
+// ---- tokenization: fund / mint token ---------------------------------------
+
+#[test]
+fn fund_mints_token_with_metadata() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_default(&h, &owner);
+
+    assert!(!h.client.is_tokenized(&id));
+    h.client.fund(&id, &DISCOUNT_RATE);
+
+    assert!(h.client.is_tokenized(&id));
+    assert_eq!(h.client.status_of(&id), Status::Funded);
+
+    let token = h.client.get_invoice_token(&id);
+    assert_eq!(token.invoice_id, id);
+    assert_eq!(token.face_value, 1_000);
+    assert_eq!(token.discount_rate, DISCOUNT_RATE);
+    assert_eq!(token.due_date, DUE_DATE);
+}
+
+#[test]
+fn fund_requires_admin_auth() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_default(&h, &owner);
+    h.client.fund(&id, &DISCOUNT_RATE);
+    assert_eq!(h.env.auths().first().unwrap().0, h.admin);
+}
+
+#[test]
+fn fund_non_pending_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+    // Already funded -> cannot fund again.
+    assert_eq!(
+        h.client.try_fund(&id, &DISCOUNT_RATE),
+        Err(Ok(Error::InvalidTransition))
+    );
+}
+
+#[test]
+fn fund_invalid_discount_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_default(&h, &owner);
+    assert_eq!(
+        h.client.try_fund(&id, &10_000u32),
+        Err(Ok(Error::InvalidDiscountRate))
+    );
+    // Funding never happened.
+    assert!(!h.client.is_tokenized(&id));
+    assert_eq!(h.client.status_of(&id), Status::Pending);
+}
+
+#[test]
+fn fund_missing_invoice_fails() {
+    let h = setup();
+    assert_eq!(
+        h.client.try_fund(&404u64, &DISCOUNT_RATE),
+        Err(Ok(Error::InvoiceNotFound))
+    );
+}
+
+// ---- tokenization: ownership queries ---------------------------------------
+
+#[test]
+fn get_invoice_token_owner_returns_owner() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+    assert_eq!(h.client.get_invoice_token_owner(&id), owner);
+}
+
+#[test]
+fn get_invoice_token_owner_untokenized_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_default(&h, &owner); // minted but not funded
+    assert_eq!(
+        h.client.try_get_invoice_token_owner(&id),
+        Err(Ok(Error::NotTokenized))
+    );
+}
+
+#[test]
+fn get_invoice_token_untokenized_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let id = mint_default(&h, &owner);
+    assert_eq!(
+        h.client.try_get_invoice_token(&id),
+        Err(Ok(Error::NotTokenized))
+    );
+}
+
+// ---- tokenization: transfer rules ------------------------------------------
+
+#[test]
+fn funded_token_transfers_and_owner_query_follows() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+
+    h.client.transfer(&owner, &buyer, &id);
+    assert_eq!(h.client.owner_of(&id), buyer);
+    assert_eq!(h.client.get_invoice_token_owner(&id), buyer);
+}
+
+#[test]
+fn transfer_blocked_after_repayment() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+    h.client.update_status(&id, &Status::Settled); // repaid
+
+    assert_eq!(
+        h.client.try_transfer(&owner, &buyer, &id),
+        Err(Ok(Error::TransferAfterRepayment))
+    );
+    assert_eq!(h.client.owner_of(&id), owner);
+}
+
+#[test]
+fn defaulted_token_can_still_transfer() {
+    // Default is not repayment; the claim (bad debt) remains transferable.
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+    h.client.update_status(&id, &Status::Defaulted);
+
+    h.client.transfer(&owner, &buyer, &id);
+    assert_eq!(h.client.owner_of(&id), buyer);
+}
+
+// ---- tokenization: approve / transfer_from ---------------------------------
+
+#[test]
+fn approve_and_transfer_from() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+
+    h.client.approve(&owner, &spender, &id);
+    assert_eq!(h.client.get_approved(&id), spender);
+
+    h.client.transfer_from(&spender, &owner, &buyer, &id);
+    assert_eq!(h.client.owner_of(&id), buyer);
+    // Approval is consumed on transfer.
+    assert_eq!(h.client.try_get_approved(&id), Err(Ok(Error::NotApproved)));
+}
+
+#[test]
+fn transfer_from_without_approval_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+
+    assert_eq!(
+        h.client.try_transfer_from(&spender, &owner, &buyer, &id),
+        Err(Ok(Error::NotApproved))
+    );
+}
+
+#[test]
+fn transfer_from_untokenized_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_default(&h, &owner); // not funded -> not tokenized
+
+    assert_eq!(
+        h.client.try_transfer_from(&spender, &owner, &buyer, &id),
+        Err(Ok(Error::NotTokenized))
+    );
+}
+
+#[test]
+fn transfer_from_blocked_after_repayment() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+    h.client.approve(&owner, &spender, &id);
+    h.client.update_status(&id, &Status::Settled);
+
+    assert_eq!(
+        h.client.try_transfer_from(&spender, &owner, &buyer, &id),
+        Err(Ok(Error::TransferAfterRepayment))
+    );
+}
+
+#[test]
+fn approve_by_non_owner_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let attacker = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+
+    assert_eq!(
+        h.client.try_approve(&attacker, &spender, &id),
+        Err(Ok(Error::NotOwner))
+    );
+}
+
+#[test]
+fn approve_untokenized_fails() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let id = mint_default(&h, &owner); // not funded
+
+    assert_eq!(
+        h.client.try_approve(&owner, &spender, &id),
+        Err(Ok(Error::NotTokenized))
+    );
+}
+
+#[test]
+fn direct_transfer_clears_outstanding_approval() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let buyer = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+
+    h.client.approve(&owner, &spender, &id);
+    h.client.transfer(&owner, &buyer, &id);
+    // Stale approval from the previous owner must not survive.
+    assert_eq!(h.client.try_get_approved(&id), Err(Ok(Error::NotApproved)));
+}
+
+#[test]
+fn approve_requires_owner_auth() {
+    let h = setup();
+    let owner = Address::generate(&h.env);
+    let spender = Address::generate(&h.env);
+    let id = mint_and_fund(&h, &owner);
+
+    h.client.approve(&owner, &spender, &id);
+    assert_eq!(h.env.auths().first().unwrap().0, owner);
 }

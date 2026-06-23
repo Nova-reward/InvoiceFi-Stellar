@@ -38,9 +38,6 @@ A farmer mints an invoice representing a future crop yield. Each invoice carries
 a face value, crop symbol, due date, free-form metadata, owner, and a lifecycle
 status.
 
-Public entry points: `initialize`, `mint`, `transfer`, `update_status`,
-`get_invoice`, `owner_of`, `status_of`, `total_minted`, `exists`, `admin`.
-
 Lifecycle state machine:
 
 ```
@@ -50,6 +47,30 @@ Pending ──▶ Funded ──▶ Settled
 ```
 
 `Settled` and `Defaulted` are terminal. State transitions are admin-gated.
+`Pending -> Funded` happens via `fund`, which also tokenizes the invoice (see
+below); all other transitions go through `update_status`.
+
+Public entry points: `initialize`, `mint`, `fund`, `transfer`, `update_status`,
+`get_invoice`, `owner_of`, `status_of`, `total_minted`, `exists`, `admin`.
+
+#### Tokenization (SEP-0041-style ownership token)
+
+When an invoice is funded it is tokenized: a unique ownership token is minted
+representing the transferable repayment claim. Invoices are non-fungible, so the
+interface is NFT-flavored (one token per invoice) using SEP-0041 naming and the
+approve / `transfer_from` delegation pattern.
+
+- `fund(invoice_id, discount_rate)` — admin; funds a `Pending` invoice and mints
+  its token, snapshotting metadata (invoice id, face value, discount rate, due
+  date).
+- `get_invoice_token(invoice_id)` — token metadata.
+- `get_invoice_token_owner(invoice_id)` — current token owner.
+- `is_tokenized(invoice_id)` — whether the invoice has been funded/tokenized.
+- `transfer(from, to, invoice_id)` — owner transfer; **blocked once the invoice
+  is repayment-settled**.
+- `approve(owner, spender, invoice_id)` / `get_approved(invoice_id)` /
+  `transfer_from(spender, from, to, invoice_id)` — delegated transfer; approval
+  is consumed on a successful transfer and cleared on any direct transfer.
 
 ### `financing-pool`
 
