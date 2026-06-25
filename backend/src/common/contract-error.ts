@@ -4,6 +4,7 @@ export enum ContractErrorCode {
   DuplicateFunding = 'DuplicateFunding',
   Unauthorized = 'Unauthorized',
   InvalidState = 'InvalidState',
+  WalletSessionExpired = 'WalletSessionExpired',
 }
 
 export class ContractError extends Error {

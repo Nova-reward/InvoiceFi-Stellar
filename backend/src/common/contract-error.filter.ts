@@ -8,6 +8,7 @@ const STATUS_MAP: Record<ContractErrorCode, number> = {
   [ContractErrorCode.DuplicateFunding]: HttpStatus.CONFLICT,
   [ContractErrorCode.Unauthorized]: HttpStatus.FORBIDDEN,
   [ContractErrorCode.InvalidState]: HttpStatus.CONFLICT,
+  [ContractErrorCode.WalletSessionExpired]: HttpStatus.UNAUTHORIZED,
 };
 
 @Catch(ContractError)
