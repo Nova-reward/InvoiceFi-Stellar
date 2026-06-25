@@ -13,9 +13,18 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    if (!payload.role || !['farmer', 'investor'].includes(payload.role)) {
-      throw new UnauthorizedException('Invalid role in token');
+    if (!payload || !payload.role || !['farmer', 'investor', 'admin'].includes(payload.role.toLowerCase())) {
+      throw new UnauthorizedException('Invalid or missing role in token');
     }
-    return { userId: payload.sub, username: payload.username, role: payload.role };
+    
+    if (!payload.sub || !payload.walletAddress) {
+      throw new UnauthorizedException('Invalid token: missing user information');
+    }
+
+    return { 
+      userId: payload.sub, 
+      walletAddress: payload.walletAddress,
+      role: payload.role 
+    };
   }
 }
