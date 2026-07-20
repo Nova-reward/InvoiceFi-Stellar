@@ -6,6 +6,8 @@ version: "3.9"
 # Services:
 #   postgres          – PostgreSQL 15 database
 #   redis             – Redis for BullMQ job queue
+#   vault             – HashiCorp Vault dev server (secrets management)
+#   vault-init        – One-shot bootstrap container that seeds Vault secrets
 #   stellar-standalone – Stellar Quickstart (standalone / local network)
 #   backend           – NestJS API (port 4000)
 #   frontend          – Next.js 14 (port 3000)
@@ -59,6 +61,60 @@ services:
     networks:
       - invoicefi_net
 
+  # ── HashiCorp Vault (dev mode) ──────────────────────────────────────────────
+  # WARNING: dev mode stores secrets in-memory only. Data is lost on restart.
+  # This is intentional for local development. Use a persistent, HA Vault
+  # cluster (e.g., Vault Enterprise or HCP Vault) in staging/production.
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: invoicefi_vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-dev-only-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_LOG_LEVEL: warn
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - invoicefi_net
+
+  # ── Vault Init (one-shot seed) ──────────────────────────────────────────────
+  # Runs once after vault is healthy to seed all local development secrets.
+  vault-init:
+    image: hashicorp/vault:1.17
+    container_name: invoicefi_vault_init
+    restart: "no"
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR:  http://vault:8200
+      VAULT_TOKEN: ${VAULT_TOKEN:-dev-only-root-token}
+      # Compose-time values used by the init script to seed secrets.
+      POSTGRES_USER:     ${POSTGRES_USER:-invoicefi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invoicefi_secret}
+      POSTGRES_DB:       ${POSTGRES_DB:-invoicefi}
+      JWT_SECRET:        ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      SMTP_HOST:         ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT:         ${SMTP_PORT:-587}
+      SMTP_SECURE:       ${SMTP_SECURE:-false}
+      SMTP_USER:         ${SMTP_USER:-dev@example.com}
+      SMTP_PASSWORD:     ${SMTP_PASSWORD:-dev_smtp_password}
+      SMTP_FROM:         ${SMTP_FROM:-noreply@invoicefi.com}
+    volumes:
+      - ./scripts/vault-init.sh:/vault-init.sh:ro
+    entrypoint: ["sh", "/vault-init.sh"]
+    networks:
+      - invoicefi_net
+
   # ── Stellar Standalone Node ─────────────────────────────────────────────────
   stellar-standalone:
     image: stellar/quickstart:latest
@@ -86,24 +142,26 @@ services:
     env_file:
       - .env
     environment:
-      NODE_ENV:          ${NODE_ENV:-development}
-      DATABASE_URL:      postgresql://${POSTGRES_USER:-invoicefi}:${POSTGRES_PASSWORD:-invoicefi_secret}@postgres:5432/${POSTGRES_DB:-invoicefi}
-      STELLAR_RPC_URL:   http://stellar-standalone:8001
-      HORIZON_URL:       http://stellar-standalone:8000
-      PORT:              4000
-      REDIS_HOST:        redis
-      REDIS_PORT:        6379
-      SMTP_HOST:         ${SMTP_HOST:-smtp.gmail.com}
-      SMTP_PORT:         ${SMTP_PORT:-587}
-      SMTP_SECURE:       ${SMTP_SECURE:-false}
-      SMTP_USER:         ${SMTP_USER}
-      SMTP_PASSWORD:     ${SMTP_PASSWORD}
-      SMTP_FROM:         ${SMTP_FROM:-noreply@invoicefi.com}
+      NODE_ENV:        ${NODE_ENV:-development}
+      VAULT_ADDR:      http://vault:8200
+      VAULT_TOKEN:     ${VAULT_TOKEN:-dev-only-root-token}
+      # Non-secret runtime config — these are NOT secrets and remain in env.
+      STELLAR_RPC_URL: http://stellar-standalone:8001
+      HORIZON_URL:     http://stellar-standalone:8000
+      PORT:            4000
+      REDIS_HOST:      redis
+      REDIS_PORT:      6379
+      SETTLEMENT_POLL_INTERVAL_MS: ${SETTLEMENT_POLL_INTERVAL_MS:-5000}
+      SETTLEMENT_MAX_ATTEMPTS:     ${SETTLEMENT_MAX_ATTEMPTS:-3}
+      SETTLEMENT_RETRY_BASE_MS:    ${SETTLEMENT_RETRY_BASE_MS:-500}
+      INVOICE_CONTRACT_ID:         ${INVOICE_CONTRACT_ID:-}
     ports:
       - "4000:4000"
     depends_on:
       postgres:
         condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
       interval: 15s
@@ -124,8 +182,8 @@ services:
     env_file:
       - .env
     environment:
-      NODE_ENV:               ${NODE_ENV:-development}
-      NEXT_PUBLIC_API_URL:    http://backend:4000
+      NODE_ENV:                ${NODE_ENV:-development}
+      NEXT_PUBLIC_API_URL:     http://backend:4000
       NEXT_PUBLIC_HORIZON_URL: http://stellar-standalone:8000
     ports:
       - "3000:3000"
