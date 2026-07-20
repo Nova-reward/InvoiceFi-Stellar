@@ -5,6 +5,7 @@ import { HealthModule } from './health/health.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SettlementModule } from './settlement/settlement.module';
+import { ComplianceModule } from './compliance/compliance.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { SettlementModule } from './settlement/settlement.module';
     PrismaModule,
     SettlementModule,
     InvoicesModule,
+    ComplianceModule,
     HealthModule,
   ],
 })
