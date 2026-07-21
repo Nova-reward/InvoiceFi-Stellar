@@ -1,30 +1,45 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
+import { VaultService } from '../config/vault/vault.service';
+
+interface SendInvoiceReminderParams {
+  to: string;
+  userName: string;
+  invoiceId: string;
+  amount: string;
+  dueDate: Date;
+  tokenType: string;
+}
+
+interface SendMailResult {
+  success: boolean;
+  messageId: string;
+}
 
 @Injectable()
-export class EmailService {
-  private transporter: nodemailer.Transporter;
+export class EmailService implements OnModuleInit {
+  private readonly logger = new Logger(EmailService.name);
+  private transporter!: nodemailer.Transporter;
 
-  constructor() {
+  constructor(private readonly vault: VaultService) {}
+
+  onModuleInit(): void {
+    // SMTP credentials are sourced from Vault, not process.env.
+    const smtp = this.vault.smtp;
     this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587'),
-      secure: process.env.SMTP_SECURE === 'true',
+      host: smtp.host,
+      port: parseInt(smtp.port, 10),
+      secure: smtp.secure === 'true',
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASSWORD,
+        user: smtp.user,
+        pass: smtp.password,
       },
     });
   }
 
-  async sendInvoiceReminder(data: {
-    to: string;
-    userName: string;
-    invoiceId: string;
-    amount: string;
-    dueDate: Date;
-    tokenType: string;
-  }) {
+  async sendInvoiceReminder(
+    data: SendInvoiceReminderParams,
+  ): Promise<SendMailResult> {
     const { to, userName, invoiceId, amount, dueDate, tokenType } = data;
 
     const formattedDate = dueDate.toLocaleDateString('en-US', {
@@ -34,7 +49,7 @@ export class EmailService {
     });
 
     const mailOptions = {
-      from: process.env.SMTP_FROM || 'noreply@invoicefi.com',
+      from: this.vault.smtp.from,
       to,
       subject: `Invoice Payment Reminder - Due on ${formattedDate}`,
       html: `
@@ -54,13 +69,8 @@ export class EmailService {
       `,
     };
 
-    try {
-      const info = await this.transporter.sendMail(mailOptions);
-      console.log(`Email sent successfully: ${info.messageId}`);
-      return { success: true, messageId: info.messageId };
-    } catch (error) {
-      console.error('Error sending email:', error);
-      throw error;
-    }
+    const info = await this.transporter.sendMail(mailOptions);
+    this.logger.log(`Email sent: ${info.messageId}`);
+    return { success: true, messageId: info.messageId as string };
   }
 }

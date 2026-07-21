@@ -10,7 +10,11 @@ import { MonitoringModule } from './monitoring/monitoring.module';
 
 @Module({
   imports: [
+    // ConfigModule provides access to non-secret env vars (PORT, VAULT_ADDR, etc.)
     ConfigModule.forRoot({ isGlobal: true }),
+    // VaultModule MUST come before any module that injects secrets.
+    // It is @Global, so secrets are available application-wide.
+    VaultModule,
     ScheduleModule.forRoot(),
     PrismaModule,
     SettlementModule,
