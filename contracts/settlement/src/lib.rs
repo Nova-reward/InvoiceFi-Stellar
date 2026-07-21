@@ -1,5 +1,4 @@
 pub mod nonce;
-
 pub mod error;
 pub mod types;
 
@@ -8,8 +7,8 @@ pub use types::{InvoiceRecord, NonceMeta, StorageKey};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 
-use crate::error::SettlementError;
-use crate::types::{NonceMeta, StorageKey};
+// use crate::error::SettlementError;
+// use crate::types::{NonceMeta, StorageKey};
 
 pub trait SettlementTrait {
     fn init(e: Env, admin: Address);
@@ -410,7 +409,7 @@ impl SettlementTrait for SettlementContract {
         invoice_id: Symbol,
         nonce: u64,
         amount: i128,
-        auth_type: u32,
+        _auth_type: u32,
     ) {
         caller.require_auth();
         let nm = NonceMeta::load(&e, &invoice_id);
@@ -471,4 +470,4 @@ impl SettlementTrait for SettlementContract {
 }
 
 #[cfg(test)]
-pub mod tests;
+mod tests;

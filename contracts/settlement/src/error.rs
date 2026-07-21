@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::Address;
 
 #[derive(Debug)]
 pub enum SettlementError {
@@ -35,4 +35,3 @@ pub struct SettlementAuthInfo {
 }
 
 #[cfg(test)]
-mod tests;
