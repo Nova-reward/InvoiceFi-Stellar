@@ -15,6 +15,7 @@ import { MonitoringModule } from './monitoring/monitoring.module';
     PrismaModule,
     SettlementModule,
     InvoicesModule,
+    ComplianceModule,
     HealthModule,
     ComplianceModule,
   ],

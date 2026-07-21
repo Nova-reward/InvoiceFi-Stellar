@@ -43,7 +43,9 @@ model Invoice {
   onchainId    BigInt        @unique
   status       InvoiceStatus @default(PENDING)
   faceValue    BigInt
+  /// @privacy retention: 365 days after settlement or creation, whichever is later; legal_basis: contract-performance, settlement-operations, fraud-prevention
   farmer       String
+  /// @privacy retention: 365 days after settlement or creation, whichever is later; legal_basis: contract-performance, settlement-operations, fraud-prevention
   investor     String?
   /// Ledger sequence in which the on-chain settlement was observed.
   settledLedger Int?

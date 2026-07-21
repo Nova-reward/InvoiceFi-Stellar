@@ -13,28 +13,19 @@ export class InvoiceService {
     return this.prisma.invoice.findMany({
       where: {
         status: 'FUNDED',
-        dueDate: {
+        createdAt: {
           lte: dueDate,
         },
       },
-      include: {
-        user: {
-          select: {
-            id: true,
-            email: true,
-            name: true,
-          },
-        },
+      orderBy: {
+        createdAt: 'asc',
       },
     });
   }
 
   async findById(id: string) {
     return this.prisma.invoice.findUnique({
-      where: { id },
-      include: {
-        user: true,
-      },
+      where: { id: Number(id) },
     });
   }
 }
