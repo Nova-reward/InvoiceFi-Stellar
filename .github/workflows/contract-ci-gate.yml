@@ -1,0 +1,201 @@
+name: Contract CI Gate
+
+on:
+  pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/contract-ci-gate.yml"
+      - "scripts/check-storage-keys.sh"
+      - "scripts/contract-simulate.sh"
+      - "scripts/contract-resource-diff.sh"
+
+concurrency:
+  group: contract-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  detect:
+    name: Detect contract changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.filter.outputs.changed }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed contract directories
+        id: filter
+        run: |
+          BASE="${GITHUB_BASE_REF:-main}"
+          # Fetch the base branch
+          git fetch origin "$BASE" --depth=1 2>/dev/null || true
+
+          CHANGED_FILES=$(git diff --name-only "origin/$BASE"...HEAD -- 'contracts/' 2>/dev/null || \
+                          git diff --name-only "origin/$BASE" -- 'contracts/' 2>/dev/null || true)
+
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "contracts=" >> "$GITHUB_OUTPUT"
+            echo "No contract changes detected."
+            exit 0
+          fi
+
+          CONTRACTS=$(echo "$CHANGED_FILES" | cut -d/ -f2 | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "contracts=$CONTRACTS" >> "$GITHUB_OUTPUT"
+          echo "Detected changes in contracts: $CONTRACTS"
+
+  storage-key-lint:
+    name: Storage Key Linter
+    needs: detect
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run storage key convention linter
+        run: bash scripts/check-storage-keys.sh
+
+  simulate:
+    name: Contract Simulation
+    needs: detect
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      results: ${{ steps.simulate.outputs.results }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-sim-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sim-
+
+      - name: Install Stellar CLI
+        uses: stellar-org/stellar-cli@v1
+
+      - name: Run contract simulation
+        id: simulate
+        env:
+          BASE_BRANCH: origin/${{ github.base_ref }}
+          CHANGED_CONTRACTS: ${{ needs.detect.outputs.contracts }}
+        run: |
+          bash scripts/contract-simulate.sh \
+            /tmp/contracts-ci/pr-results.json \
+            /tmp/contracts-ci/pr-summary.md \
+            "$CHANGED_CONTRACTS"
+
+      - name: Upload simulation results
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-results
+          path: /tmp/contracts-ci/
+          retention-days: 7
+
+  resource-diff:
+    name: Resource Diff
+    needs: [detect, simulate]
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-sim-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sim-
+
+      - name: Install Stellar CLI
+        uses: stellar-org/stellar-cli@v1
+
+      - name: Download PR simulation results
+        uses: actions/download-artifact@v4
+        with:
+          name: simulation-results
+          path: /tmp/contracts-ci/
+
+      - name: Run simulation on base branch
+        id: base-sim
+        env:
+          CHANGED_CONTRACTS: ${{ needs.detect.outputs.contracts }}
+        run: |
+          # Stash uncommitted, checkout base, simulate, return
+          git stash --include-untracked 2>/dev/null || true
+          git checkout "origin/${{ github.base_ref }}" 2>/dev/null || true
+
+          mkdir -p /tmp/contracts-ci
+          bash scripts/contract-simulate.sh \
+            /tmp/contracts-ci/base-results.json \
+            /tmp/contracts-ci/base-summary.md \
+            "$CHANGED_CONTRACTS" || true
+
+          git checkout "${{ github.sha }}" 2>/dev/null || true
+          git stash pop 2>/dev/null || true
+
+      - name: Generate resource diff report
+        id: diff
+        run: |
+          bash scripts/contract-resource-diff.sh \
+            /tmp/contracts-ci/base-results.json \
+            /tmp/contracts-ci/pr-results.json \
+            /tmp/contracts-ci/resource-diff.md
+
+      - name: Upload resource diff report
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-diff-report
+          path: /tmp/contracts-ci/resource-diff.md
+          retention-days: 7
+
+      - name: Find existing bot comment
+        uses: peter-evans/find-comment@v3
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: "github-actions[bot]"
+          body-includes: "Contract Resource Diff Report"
+
+      - name: Post or update PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: /tmp/contracts-ci/resource-diff.md
+          edit-mode: replace

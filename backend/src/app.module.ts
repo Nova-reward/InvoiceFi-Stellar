@@ -1,10 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ComplianceModule } from './compliance/compliance.module';
 import { HealthModule } from './health/health.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SettlementModule } from './settlement/settlement.module';
+import { MonitoringModule } from './monitoring/monitoring.module';
 
 @Module({
   imports: [
@@ -13,7 +15,9 @@ import { SettlementModule } from './settlement/settlement.module';
     PrismaModule,
     SettlementModule,
     InvoicesModule,
+    ComplianceModule,
     HealthModule,
+    ComplianceModule,
   ],
 })
 export class AppModule {}

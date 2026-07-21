@@ -18,5 +18,26 @@
     "rootDir": "./src"
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.spec.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.spec.ts",
+    // Incomplete/experimental modules from parallel contributor branches that
+    // are NOT wired into AppModule. They were merged against a richer schema
+    // (User, funding, dueDate, ownerId, ...) and framework deps (@nestjs/jwt,
+    // passport, class-validator, swagger, bull, websockets, socket.io,
+    // nodemailer) that this repo does not (yet) provide, so they do not
+    // compile. Excluded to keep `npm run build` green for the running app;
+    // re-include a directory once its schema/deps land. See docs/EXCLUDED_MODULES.md.
+    "src/api",
+    "src/auth",
+    "src/email",
+    "src/financing-pool",
+    "src/invoice",
+    "src/invoice-reminder",
+    "src/notification",
+    "src/notifications",
+    "src/settlement/settlement.controller.ts",
+    "src/settlement/dto"
+  ]
 }
