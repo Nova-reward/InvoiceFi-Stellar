@@ -80,24 +80,29 @@ Stellar Blockchain
 
 ## Getting Started
 
-### Clone Repository
+For a complete step-by-step guide — including prerequisites, environment setup, Soroban contract deployment, and troubleshooting — see **[CONTRIBUTING.md](./CONTRIBUTING.md)**.
+
+Quick start with Docker:
 
 ```bash
 git clone https://github.com/Christopherdominic/InvoiceFi-Stellar.git
 cd InvoiceFi-Stellar
+
+# Copy and configure environment variables
+cp .env.example .env
+# Edit .env — set JWT_SECRET and POSTGRES_PASSWORD at minimum
+
+# Start the full stack (PostgreSQL, Redis, Stellar node, backend, frontend)
+docker compose up --build
 ```
 
-### Install Dependencies
-
-```bash
-npm install
-```
-
-### Run Development Server
-
-```bash
-npm run dev
-```
+| Service | URL |
+| --- | --- |
+| Frontend (Next.js) | http://localhost:3000 |
+| Backend API (NestJS) | http://localhost:4000 |
+| Horizon API | http://localhost:8000 |
+| Soroban RPC | http://localhost:8001 |
+| PostgreSQL | localhost:5432 |
 
 ---
 
@@ -216,18 +221,24 @@ AgroLedger/
 
 ## Contributing
 
-1. Fork the repository  
-2. Create a feature branch  
-3. Commit your changes  
-4. Push and open a Pull Request  
+Read **[CONTRIBUTING.md](./CONTRIBUTING.md)** for the full contributor guide, including:
+
+- Prerequisites (Node.js 20, Rust stable, Stellar CLI, Docker)
+- Step-by-step local setup from clone to `npm run dev`
+- Soroban contract build, deploy, and initialize commands
+- Database migration workflow
+- How to run the test suite and pass CI checks
+- Troubleshooting: Freighter not detected, contract deploy failures, DB migration errors
 
 ## CI / Branch Protection
 
 GitHub Actions runs on pull requests targeting `main` and `develop` and must pass these required checks before merge:
 
-1. `contract-build-test`
-2. `backend-test`
-3. `frontend-lint`
+| Check | What it validates |
+| --- | --- |
+| `contract-build-test` | Rust fmt, Clippy, and `cargo test --all` |
+| `backend-test` | NestJS unit tests via Jest |
+| `frontend-lint` | Next.js ESLint |
 
 Configure branch protection for `main` and `develop` to require all three checks and to block merges until they succeed.
 
@@ -242,4 +253,3 @@ MIT License
 ## Vision
 
 InvoiceFi Stellar aims to unlock agricultural liquidity by transforming future harvests into verifiable on-chain financial instruments, connecting farmers to global decentralized capital markets.
-```
