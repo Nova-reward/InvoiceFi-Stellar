@@ -15,6 +15,26 @@ enum InvoiceStatus {
   DEFAULTED
 }
 
+/// Kind of regulatory export a job produces.
+enum ExportType {
+  TRANSACTIONS
+  INVESTOR_REPORT
+}
+
+/// Serialization format of an export document.
+enum ExportFormat {
+  JSON
+  CSV
+}
+
+/// Lifecycle of an asynchronous export job.
+enum ExportJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 /// Off-chain mirror of an on-chain invoice. `onchainId` is the invoice id
 /// allocated by the Soroban invoice contract and is the join key used by the
 /// settlement event listener.
@@ -28,12 +48,67 @@ model Invoice {
   /// Ledger sequence in which the on-chain settlement was observed.
   settledLedger Int?
   settledAt    DateTime?
+  /// Price the investor actually paid to fund the invoice (in the asset's
+  /// minor units). Optional — absent for invoices funded before economic-term
+  /// capture; investor P&L falls back to `faceValue` (par) when null.
+  fundedAmount BigInt?
+  /// Amount actually collected when the invoice was repaid, in minor units.
+  /// Optional for the same reason as `fundedAmount`.
+  repaidAmount BigInt?
+  /// Settlement asset code (e.g. "USDC"). Optional; defaults to the
+  /// deployment's configured asset when null.
+  assetCode    String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
   @@index([status])
   @@index([farmer])
   @@index([investor])
+}
+
+/// An asynchronous regulatory export request and its signed result.
+///
+/// The serialized document (`content`) is the exact byte sequence covered by
+/// `sha256` and `signature`; integrity metadata is stored alongside it rather
+/// than embedded, so the bytes a verifier hashes never depend on the proof.
+model ExportJob {
+  id              String          @id @default(uuid())
+  type            ExportType
+  format          ExportFormat
+  status          ExportJobStatus @default(PENDING)
+  /// Wallet address of the authenticated requester (audit trail).
+  requestedBy     String
+  /// Role the requester held at request time ("admin" | "investor" | ...).
+  requesterRole   String
+  /// Wallet the export is scoped to. Null means "all subjects" (admin only).
+  subject         String?
+  /// FATF Travel Rule threshold applied, as a minor-units decimal string.
+  thresholdMinorUnits String?
+  /// Inclusive lower/upper bounds on transaction date, when supplied.
+  rangeStart      DateTime?
+  rangeEnd        DateTime?
+  /// Number of records in the completed document.
+  recordCount     Int?
+  /// Length of `content` in UTF-8 bytes.
+  byteLength      Int?
+  /// Hex-encoded SHA-256 of `content`.
+  sha256          String?
+  /// Base64-encoded ed25519 signature of `content` by the compliance key.
+  signature       String?
+  /// Stellar public key (G...) of the compliance signing key.
+  signerPublicKey String?
+  /// Serialized export document (JSON or CSV). Populated once COMPLETED.
+  content         String?
+  /// MIME type of `content`.
+  contentType     String?
+  /// Failure reason when status is FAILED.
+  error           String?
+  createdAt       DateTime        @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  @@index([requestedBy])
+  @@index([status])
 }
 
 /// Singleton row tracking the last Soroban ledger the event listener has
