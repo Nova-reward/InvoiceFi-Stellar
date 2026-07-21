@@ -1,13 +1,16 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '../prisma/prisma.module';
 import { ComplianceController } from './compliance.controller';
 import { ComplianceService } from './compliance.service';
-import { ComplianceScheduler } from './compliance.scheduler';
+import { ComplianceConfig } from './compliance.config';
+import { ExportSigningService } from './export-signing.service';
 
+/**
+ * Regulatory disclosure & export API (FATF Travel Rule, transaction history,
+ * investor P&L reports) with access control and signed, audit-ready output.
+ */
 @Module({
-  imports: [PrismaModule],
   controllers: [ComplianceController],
-  providers: [ComplianceService, ComplianceScheduler],
+  providers: [ComplianceService, ComplianceConfig, ExportSigningService],
   exports: [ComplianceService],
 })
 export class ComplianceModule {}
