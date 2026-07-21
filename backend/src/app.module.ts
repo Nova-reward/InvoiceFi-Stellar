@@ -6,6 +6,7 @@ import { HealthModule } from './health/health.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SettlementModule } from './settlement/settlement.module';
+import { MonitoringModule } from './monitoring/monitoring.module';
 
 @Module({
   imports: [
