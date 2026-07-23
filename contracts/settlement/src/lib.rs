@@ -4,12 +4,12 @@ pub mod error;
 pub mod types;
 
 pub use error::{SettlementError, SettlementStatus};
-pub use types::{InvoiceRecord, NonceMeta, StorageKey};
+pub use types::{InvoiceRecord, NonceMeta, StorageKey, ReentrancyGuard};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 
 use crate::error::SettlementError;
-use crate::types::{NonceMeta, StorageKey};
+use crate::types::{NonceMeta, StorageKey, ReentrancyGuard};
 
 pub trait SettlementTrait {
     fn init(e: Env, admin: Address);
@@ -53,6 +53,8 @@ pub trait SettlementTrait {
     fn withdraw_fees(e: Env, caller: Address, to: Address, amount: i128);
     fn get_invoice(e: Env, invoice_id: Symbol) -> Option<crate::types::InvoiceRecord>;
     fn get_used_nonces(e: Env, invoice_id: Symbol) -> soroban_sdk::Vec<u64>;
+    fn set_financing_pool_address(e: Env, caller: Address, pool_address: Address);
+    fn get_financing_pool_address(e: Env) -> Option<Address>;
 
     fn settle_invoice(
         e: Env,
@@ -83,6 +85,10 @@ impl SettlementTrait for SettlementContract {
         e.storage()
             .instance()
             .set(&StorageKey::instance("WITHDRAWN_FEES"), &0i128);
+        // Initialize reentrancy guard as unlocked
+        e.storage()
+            .instance()
+            .set(&StorageKey::ReentrancyGuard, &ReentrancyGuard::Unlocked);
     }
 
     fn get_settlement_status(e: Env, invoice_id: Symbol) -> Option<u32> {
@@ -404,6 +410,31 @@ impl SettlementTrait for SettlementContract {
         nm.used_nonces.clone()
     }
 
+    fn set_financing_pool_address(e: Env, caller: Address, pool_address: Address) {
+        caller.require_auth();
+        let admin: Address = e
+            .storage()
+            .instance()
+            .get(&StorageKey::instance("ADMIN"))
+            .expect("not initialized");
+        if caller != admin {
+            panic!("Err: NOT_ADMIN");
+        }
+        e.storage()
+            .instance()
+            .set(&StorageKey::FinancingPoolAddress, &pool_address);
+        e.events().publish(
+            (Symbol::new(&e, "settlement"), Symbol::new(&e, "financing_pool_set")),
+            (pool_address,),
+        );
+    }
+
+    fn get_financing_pool_address(e: Env) -> Option<Address> {
+        e.storage()
+            .instance()
+            .get(&StorageKey::FinancingPoolAddress)
+    }
+
     fn settle_invoice(
         e: Env,
         caller: Address,
@@ -413,6 +444,18 @@ impl SettlementTrait for SettlementContract {
         auth_type: u32,
     ) {
         caller.require_auth();
+        
+        // SAFETY: Reentrancy guard check before any state changes
+        // This prevents reentrant calls from external contracts
+        let guard: ReentrancyGuard = e
+            .storage()
+            .instance()
+            .get(&StorageKey::ReentrancyGuard)
+            .unwrap_or(ReentrancyGuard::Unlocked);
+        if guard == ReentrancyGuard::Locked {
+            panic!("Err: REENTRANCY_DETECTED");
+        }
+        
         let nm = NonceMeta::load(&e, &invoice_id);
         if !nm.is_valid(&e, nonce) {
             panic!("Err: NONCE_REPLAY");
@@ -441,6 +484,7 @@ impl SettlementTrait for SettlementContract {
         let fee = (amount * fee_rate as i128) / 10000;
         let net = amount - fee;
 
+        // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
         let collected: i128 = e
             .storage()
             .instance()
@@ -452,7 +496,8 @@ impl SettlementTrait for SettlementContract {
 
         let new_principal = record.principal_paid + net;
         record.principal_paid = new_principal;
-        if new_principal >= record.amount {
+        let is_fully_settled = new_principal >= record.amount;
+        if is_fully_settled {
             record.status = crate::error::SettlementStatus::Settled as u32;
         }
 
@@ -463,6 +508,29 @@ impl SettlementTrait for SettlementContract {
         let nonce_key = StorageKey::nonce_meta(&invoice_id);
         e.storage().persistent().set(&nonce_key, &nm2);
 
+        // SAFETY: Set reentrancy guard before cross-contract call
+        e.storage()
+            .instance()
+            .set(&StorageKey::ReentrancyGuard, &ReentrancyGuard::Locked);
+
+        // SAFETY: Cross-contract call to financing pool to notify of settlement
+        // Risk: Financing pool could re-enter this contract
+        // Mitigation: Reentrancy guard is active, state already updated
+        // Call ordering: State updated before this call (checks-effects-interactions)
+        if let Some(pool_address) = e.storage().instance().get(&StorageKey::FinancingPoolAddress) {
+            // Note: In production, this would use soroban_sdk::invoke_contract
+            // For now, we emit an event that the backend can use to orchestrate
+            e.events().publish(
+                (Symbol::new(&e, "settlement"), Symbol::new(&e, "notify_financing_pool")),
+                (invoice_id.clone(), pool_address, amount, net),
+            );
+        }
+
+        // SAFETY: Release reentrancy guard after cross-contract call
+        e.storage()
+            .instance()
+            .set(&StorageKey::ReentrancyGuard, &ReentrancyGuard::Unlocked);
+
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "settled")),
             (invoice_id, caller, amount, nonce, fee, net, new_principal),
@@ -472,3 +540,5 @@ impl SettlementTrait for SettlementContract {
 
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod reentrancy_tests;
