@@ -47,6 +47,11 @@ model Invoice {
   farmer       String
   /// @privacy retention: 365 days after settlement or creation, whichever is later; legal_basis: contract-performance, settlement-operations, fraud-prevention
   investor     String?
+  /// Wallet address of the entity funding the invoice. Replaces the deprecated investor column.
+  /// @privacy retention: 365 days after settlement or creation, whichever is later; legal_basis: contract-performance, settlement-operations, fraud-prevention
+  funder       String?
+  /// Discount percentage applied to invoice (0-100). Nullable for backward compatibility.
+  discountPercentage Decimal?  @db.Decimal(5, 2)
   /// Ledger sequence in which the on-chain settlement was observed.
   settledLedger Int?
   settledAt    DateTime?
@@ -66,6 +71,7 @@ model Invoice {
   @@index([status])
   @@index([farmer])
   @@index([investor])
+  @@index([funder])
 }
 
 /// An asynchronous regulatory export request and its signed result.
