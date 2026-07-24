@@ -8,6 +8,13 @@
     "start": "node dist/main",
     "start:dev": "ts-node src/main.ts",
     "prisma:generate": "prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:status": "prisma migrate status",
+    "prisma:migrate:reset": "prisma migrate reset",
+    "prisma:db:pull": "prisma db pull",
+    "prisma:db:push": "prisma db push",
+    "prisma:studio": "prisma studio",
     "test": "jest",
     "test:watch": "jest --watch"
   },
