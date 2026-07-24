@@ -1,7 +1,6 @@
-use super::{
-    SettlementContract, SettlementError, SettlementStatus, StorageKey,
-};
-use soroban_sdk::{Address, Env, Symbol};
+use super::{SettlementContract, SettlementStatus, SettlementTrait, StorageKey};
+use crate::types::NonceMeta;
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec};
 
 #[test]
 fn test_init_stores_admin() {
@@ -25,7 +24,6 @@ fn test_settle_invoice_requires_nonce() {
     e.mock_all_auths();
     let admin = Address::generate(&e);
     let caller = Address::generate(&e);
-    // removed
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -43,7 +41,7 @@ fn test_settle_invoice_requires_nonce() {
 
     let deadline = 3000000000u64 + 2592000;
     let nm_key = StorageKey::nonce_meta(&invoice_id);
-    let nm = crate::types::NonceMeta::new(invoice_id.clone(), deadline);
+    let nm = NonceMeta::new(invoice_id.clone(), deadline);
     e.storage().persistent().set(&nm_key, &nm);
 
     // First call with nonce=1 should succeed (caller authenticated)
@@ -66,7 +64,6 @@ fn test_settle_invoice_with_valid_nonce() {
     e.mock_all_auths();
     let admin = Address::generate(&e);
     let payer = Address::generate(&e);
-    // removed
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -84,7 +81,7 @@ fn test_settle_invoice_with_valid_nonce() {
 
     let deadline = 5000000000u64 + 2592000;
     let nm_key = StorageKey::nonce_meta(&invoice_id);
-    let nm = crate::types::NonceMeta::new(invoice_id.clone(), deadline);
+    let nm = NonceMeta::new(invoice_id.clone(), deadline);
     e.storage().persistent().set(&nm_key, &nm);
 
     // First call - should succeed
@@ -109,8 +106,7 @@ fn test_settle_without_nonce_meta_creates_it() {
     let e = Env::default();
     e.mock_all_auths();
     let admin = Address::generate(&e);
-    let payer = Address::generate(&e);
-    // removed
+    let borrower = Address::generate(&e);
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -119,40 +115,23 @@ fn test_settle_without_nonce_meta_creates_it() {
         e.clone(),
         admin.clone(),
         invoice_id.clone(),
-        payer.clone(),
-        payer.clone(),
+        borrower.clone(),
+        borrower.clone(),
         3000,
         5000000000,
         0, // zero fee rate
     );
 
-    // No nonce meta at all - settle_invoice should auto-create with due_date=0
-    // and accept any nonce (treating deadline as past → reject)
-    // This verifies the lazy-create path
-    let before_nonces = SettlementContract::get_used_nonces(e.clone(), invoice_id.clone());
-    assert!(before_nonces.is_empty());
-}
-        admin.clone(),
-        invoice_id.clone(),
-        borrower.clone(),
-        borrower.clone(),
-        5000,
-        3000000000,
-        500,
-    );
+    assert!(SettlementContract::get_used_nonces(e.clone(), invoice_id.clone()).is_empty());
 
     let deadline = 3000000000u64 + 2592000;
-
     let nm_key = StorageKey::nonce_meta(&invoice_id);
-    use crate::types::NonceMeta;
     let nm = NonceMeta::new(invoice_id.clone(), deadline);
-    e.storage()
-        .persistent()
-        .set(&nm_key, &nm);
+    
+    e.storage().persistent().set(&nm_key, &nm);
 
-    // borrower authenticates as caller
-    // This will panic if settle_invoice checks auth
-    SettlementContract::settle_invoice(e, borrower, invoice_id, 1, 5000, 0);
+    // Borrower authenticates as caller and settles invoice
+    SettlementContract::settle_invoice(e, borrower, invoice_id, 1, 3000, 0);
 }
 
 #[test]
@@ -162,7 +141,6 @@ fn test_nonce_replay_rejected() {
     e.mock_all_auths();
     let admin = Address::generate(&e);
     let payer = Address::generate(&e);
-    // removed
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -180,11 +158,8 @@ fn test_nonce_replay_rejected() {
 
     let deadline = 3900000000u64 + 2592000;
     let nm_key = StorageKey::nonce_meta(&invoice_id);
-    use crate::types::NonceMeta;
     let nm = NonceMeta::new(invoice_id.clone(), deadline);
-    e.storage()
-        .persistent()
-        .set(&nm_key, &nm);
+    e.storage().persistent().set(&nm_key, &nm);
 
     // Use nonce 42 the first time - should succeed
     SettlementContract::settle_invoice(
@@ -207,7 +182,6 @@ fn test_settlement_nonce_expiry() {
     e.mock_all_auths();
     let admin = Address::generate(&e);
     let payer = Address::generate(&e);
-    // removed
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -227,17 +201,10 @@ fn test_settlement_nonce_expiry() {
 
     let deadline = due_date + 2592000;
     let nm_key = StorageKey::nonce_meta(&invoice_id);
-    use crate::types::NonceMeta;
     let nm = NonceMeta::new(invoice_id.clone(), deadline);
-    e.storage()
-        .persistent()
-        .set(&nm_key, &nm);
+    e.storage().persistent().set(&nm_key, &nm);
 
-    // Current time is past deadline - nonce should be rejected
-    // We can't manipulate the ledger timestamp easily, but the test
-    // documents the expiry check path
-    let used: soroban_sdk::Vec<u64> =
-        SettlementContract::get_used_nonces(e, invoice_id);
+    let used: Vec<u64> = SettlementContract::get_used_nonces(e, invoice_id);
     assert!(used.is_empty());
 }
 
@@ -246,7 +213,6 @@ fn test_get_used_nonces_returns_list() {
     let e = Env::default();
     e.mock_all_auths();
     let admin = Address::generate(&e);
-    // removed
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -262,7 +228,6 @@ fn test_get_used_nonces_returns_list() {
         500,
     );
 
-    // Not yet used
     let used = SettlementContract::get_used_nonces(e.clone(), invoice_id.clone());
     assert_eq!(used.len(), 0);
 }
@@ -273,7 +238,6 @@ fn test_settle_updates_principal() {
     e.mock_all_auths();
     let admin = Address::generate(&e);
     let payer = Address::generate(&e);
-    // removed
 
     SettlementContract::init(e.clone(), admin.clone());
 
@@ -291,11 +255,8 @@ fn test_settle_updates_principal() {
 
     let deadline = 5000000000u64 + 2592000;
     let nm_key = StorageKey::nonce_meta(&invoice_id);
-    use crate::types::NonceMeta;
     let nm = NonceMeta::new(invoice_id.clone(), deadline);
-    e.storage()
-        .persistent()
-        .set(&nm_key, &nm);
+    e.storage().persistent().set(&nm_key, &nm);
 
     SettlementContract::settle_invoice(
         e.clone(),
@@ -308,5 +269,5 @@ fn test_settle_updates_principal() {
 
     let rec = SettlementContract::get_invoice(e, invoice_id).unwrap();
     assert_eq!(rec.principal_paid, 5000);
-    assert_eq!(rec.status, SettlementStatus::ApprovedForSettlement as u32);
+    assert_eq!(rec.status, SettlementStatus::Approved as u32);
 }

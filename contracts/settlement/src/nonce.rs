@@ -1,4 +1,4 @@
-use soroban_sdk::{Env, Symbol, Vec};
+use soroban_sdk::{Env, Symbol};
 use crate::types::{NonceMeta, StorageKey};
 
 // NonceManager provides static helper methods for nonce bookkeeping.

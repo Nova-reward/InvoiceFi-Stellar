@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 /// Storage keys for contract addresses and reentrancy guard
 #[derive(Clone)]
@@ -52,10 +52,8 @@ pub struct InvoiceRecord {
     pub approval_status: u32,
 }
 
-/// Nonce metadata stored per invoice.
-/// A nonce is valid only before due_date + 30 days (2592000 seconds) and
-/// only if it has not been previously accepted.
-#[derive(Clone, Debug)]
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NonceMeta {
     pub invoice_id: Symbol,
     pub used_nonces: Vec<u64>,
@@ -83,19 +81,16 @@ impl NonceMeta {
         self.used_nonces.push_back(nonce);
     }
 
-    /// Returns true if the nonce has not been used AND is still within the
-    /// 30-day post-due-date validity window.
-    pub fn is_valid(&self, _e: &Env, nonce: u64) -> bool {
+    pub fn is_valid(&self, e: &Env, nonce: u64) -> bool {
         if self.used_nonces.contains(&nonce) {
             return false;
         }
         let deadline = self.due_date.saturating_add(2592000);
-        let now: u64 = _e.ledger().timestamp();
+        let now: u64 = e.ledger().timestamp();
         now <= deadline
     }
 }
 
-// Type alias kept for backward compatibility
 pub type SettlementNonce = NonceMeta;
 
 /// Reentrancy guard state

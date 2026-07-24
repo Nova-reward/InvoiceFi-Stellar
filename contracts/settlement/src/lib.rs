@@ -1,5 +1,4 @@
 pub mod nonce;
-
 pub mod error;
 pub mod types;
 
@@ -441,7 +440,7 @@ impl SettlementTrait for SettlementContract {
         invoice_id: Symbol,
         nonce: u64,
         amount: i128,
-        auth_type: u32,
+        _auth_type: u32,
     ) {
         caller.require_auth();
         
