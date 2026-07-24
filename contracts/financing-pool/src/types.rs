@@ -1,6 +1,7 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
 
 /// Token contract addresses for supported assets
+#[contracttype]
 #[derive(Clone, Debug)]
 pub enum TokenContract {
     XLM,
@@ -19,6 +20,7 @@ impl TokenContract {
 }
 
 /// Reentrancy guard state
+#[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReentrancyGuard {
     Unlocked,

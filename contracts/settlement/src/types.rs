@@ -1,6 +1,7 @@
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 /// Storage keys for contract addresses and reentrancy guard
+#[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
     Instance(Symbol),
@@ -34,6 +35,7 @@ impl StorageKey {
     }
 }
 
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct InvoiceRecord {
     pub id: Symbol,
@@ -94,6 +96,7 @@ impl NonceMeta {
 pub type SettlementNonce = NonceMeta;
 
 /// Reentrancy guard state
+#[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReentrancyGuard {
     Unlocked,
