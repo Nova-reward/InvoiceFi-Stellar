@@ -12,8 +12,11 @@
 //! SEP-41 token contract in the settlement layer.
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, Symbol,
 };
+
+use crate::types::{TokenContract, ReentrancyGuard, StorageKey};
+use crate::error::FinancingPoolError;
 
 /// Record of capital advanced against a single invoice.
 #[contracttype]
@@ -107,6 +110,10 @@ impl FinancingPoolContract {
             .instance()
             .set(&DataKey::DiscountBps, &discount_bps);
         env.storage().instance().set(&DataKey::Available, &0i128);
+        // Initialize reentrancy guard as unlocked
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Unlocked);
         Ok(())
     }
 
@@ -118,9 +125,49 @@ impl FinancingPoolContract {
             return Err(Error::InvalidAmount);
         }
 
+        // SAFETY: Reentrancy guard check before any state changes
+        let guard: ReentrancyGuard = env
+            .storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard())
+            .unwrap_or(ReentrancyGuard::Unlocked);
+        if guard == ReentrancyGuard::Locked {
+            return Err(Error::ReentrancyDetected);
+        }
+
+        // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
         let balance = Self::balance_inner(&env, &from) + amount;
         Self::set_balance(&env, &from, balance);
         Self::set_available(&env, Self::available_inner(&env) + amount);
+
+        // SAFETY: Set reentrancy guard before token transfer
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
+
+        // SAFETY: Cross-contract call to token contract (XLM)
+        // Risk: Token contract could re-enter this contract
+        // Mitigation: Reentrancy guard is active, state already updated
+        // Call ordering: State updated before this call (checks-effects-interactions)
+        if let Some(token_address) = env.storage().instance().get(&StorageKey::token_address(&TokenContract::XLM)) {
+            // Note: In production, this would use soroban_sdk::invoke_contract to transfer tokens
+            // For now, we emit an event that the backend can use to orchestrate
+            env.events().publish(
+                (Symbol::new(&env, "pool"), Symbol::new(&env, "token_transfer_in")),
+                (from.clone(), token_address, amount, TokenContract::XLM.to_symbol()),
+            );
+        } else {
+            // Fallback: emit event without actual transfer for now
+            env.events().publish(
+                (Symbol::new(&env, "pool"), Symbol::new(&env, "deposit_pending_token")),
+                (from, amount),
+            );
+        }
+
+        // SAFETY: Release reentrancy guard after token transfer
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Unlocked);
 
         Deposited { from, amount }.publish(&env);
         Ok(())
@@ -137,6 +184,16 @@ impl FinancingPoolContract {
             return Err(Error::InvalidAmount);
         }
 
+        // SAFETY: Reentrancy guard check before any state changes
+        let guard: ReentrancyGuard = env
+            .storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard())
+            .unwrap_or(ReentrancyGuard::Unlocked);
+        if guard == ReentrancyGuard::Locked {
+            return Err(Error::ReentrancyDetected);
+        }
+
         let balance = Self::balance_inner(&env, &to);
         if balance < amount {
             return Err(Error::InsufficientBalance);
@@ -146,8 +203,38 @@ impl FinancingPoolContract {
             return Err(Error::InsufficientLiquidity);
         }
 
+        // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
         Self::set_balance(&env, &to, balance - amount);
         Self::set_available(&env, available - amount);
+
+        // SAFETY: Set reentrancy guard before token transfer
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
+
+        // SAFETY: Cross-contract call to token contract (XLM)
+        // Risk: Token contract could re-enter this contract
+        // Mitigation: Reentrancy guard is active, state already updated
+        // Call ordering: State updated before this call (checks-effects-interactions)
+        if let Some(token_address) = env.storage().instance().get(&StorageKey::token_address(&TokenContract::XLM)) {
+            // Note: In production, this would use soroban_sdk::invoke_contract to transfer tokens
+            // For now, we emit an event that the backend can use to orchestrate
+            env.events().publish(
+                (Symbol::new(&env, "pool"), Symbol::new(&env, "token_transfer_out")),
+                (to.clone(), token_address, amount, TokenContract::XLM.to_symbol()),
+            );
+        } else {
+            // Fallback: emit event without actual transfer for now
+            env.events().publish(
+                (Symbol::new(&env, "pool"), Symbol::new(&env, "withdraw_pending_token")),
+                (to, amount),
+            );
+        }
+
+        // SAFETY: Release reentrancy guard after token transfer
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Unlocked);
 
         Withdrawn { to, amount }.publish(&env);
         Ok(())
@@ -259,6 +346,27 @@ impl FinancingPoolContract {
         Self::admin_inner(&env)
     }
 
+    /// Set token contract address for a specific token (XLM, USDC, AQUA). Admin-only.
+    pub fn set_token_address(env: Env, token: TokenContract, address: Address) -> Result<(), Error> {
+        let admin = Self::admin_inner(&env)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&StorageKey::token_address(&token), &address);
+        env.events().publish(
+            (Symbol::new(&env, "pool"), Symbol::new(&env, "token_address_set")),
+            (token.to_symbol(), address),
+        );
+        Ok(())
+    }
+
+    /// Get token contract address for a specific token.
+    pub fn get_token_address(env: Env, token: TokenContract) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::token_address(&token))
+    }
+
     // ---- internals -------------------------------------------------------
 
     fn advance_for(env: &Env, face_value: i128) -> i128 {
@@ -314,3 +422,5 @@ impl FinancingPoolContract {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod reentrancy_tests;

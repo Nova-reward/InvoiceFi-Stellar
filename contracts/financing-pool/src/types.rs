@@ -1,5 +1,30 @@
 use soroban_sdk::{Address, Env, Symbol};
 
+/// Token contract addresses for supported assets
+#[derive(Clone, Debug)]
+pub enum TokenContract {
+    XLM,
+    USDC,
+    AQUA,
+}
+
+impl TokenContract {
+    pub fn to_symbol(&self) -> Symbol {
+        match self {
+            TokenContract::XLM => Symbol::new(&Env::default(), "XLM"),
+            TokenContract::USDC => Symbol::new(&Env::default(), "USDC"),
+            TokenContract::AQUA => Symbol::new(&Env::default(), "AQUA"),
+        }
+    }
+}
+
+/// Reentrancy guard state
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReentrancyGuard {
+    Unlocked,
+    Locked,
+}
+
 #[derive(Clone, Debug)]
 pub struct PoolBalance {
     pub total: i128,
@@ -86,5 +111,13 @@ impl StorageKey {
 
     pub fn fund_req_status(req: &Symbol) -> Self {
         Self::new("FUND_REQ_STATUS", req.as_str())
+    }
+
+    pub fn token_address(token: &TokenContract) -> Self {
+        Self::new("TOKEN_ADDRESS", token.to_symbol().as_str())
+    }
+
+    pub fn reentrancy_guard() -> Self {
+        Self::instance("REENTRANCY_GUARD")
     }
 }

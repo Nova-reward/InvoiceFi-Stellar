@@ -1,5 +1,39 @@
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
+/// Storage keys for contract addresses and reentrancy guard
+#[derive(Clone)]
+pub enum StorageKey {
+    Instance(Symbol),
+    InvoiceData(Symbol),
+    InvoiceStatus(Symbol),
+    InvoiceAuth0(Symbol),
+    NonceMeta(Symbol),
+    FinancingPoolAddress,
+    ReentrancyGuard,
+}
+
+impl StorageKey {
+    pub fn instance(name: &str) -> Self {
+        StorageKey::Instance(Symbol::new(&Env::default(), name))
+    }
+
+    pub fn invoice_data(invoice_id: &Symbol) -> Self {
+        StorageKey::InvoiceData(invoice_id.clone())
+    }
+
+    pub fn invoice_status(invoice_id: &Symbol) -> Self {
+        StorageKey::InvoiceStatus(invoice_id.clone())
+    }
+
+    pub fn invoice_auth0(invoice_id: &Symbol) -> Self {
+        StorageKey::InvoiceAuth0(invoice_id.clone())
+    }
+
+    pub fn nonce_meta(invoice_id: &Symbol) -> Self {
+        StorageKey::NonceMeta(invoice_id.clone())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct InvoiceRecord {
     pub id: Symbol,
@@ -63,3 +97,10 @@ impl NonceMeta {
 
 // Type alias kept for backward compatibility
 pub type SettlementNonce = NonceMeta;
+
+/// Reentrancy guard state
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReentrancyGuard {
+    Unlocked,
+    Locked,
+}
