@@ -1,17 +1,16 @@
 [package]
-name = "invoice-contract"
+name = "access-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
-access-control = { path = "../access-control" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

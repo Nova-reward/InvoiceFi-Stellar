@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env,
+};
 
 const DISCOUNT_BPS: u32 = 1_000; // 10%
 
@@ -11,13 +14,27 @@ struct Harness {
     admin: Address,
 }
 
+fn signers_of(env: &Env, addrs: &[Address]) -> Vec<Address> {
+    let mut v = Vec::new(env);
+    for a in addrs {
+        v.push_back(a.clone());
+    }
+    v
+}
+
 fn setup_with(discount_bps: u32) -> Harness {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin, &discount_bps);
+    let signers = signers_of(&env, &[admin.clone()]);
+    client.initialize(
+        &signers,
+        &1u32,
+        &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
+        &discount_bps,
+    );
     Harness { env, client, admin }
 }
 
@@ -30,7 +47,7 @@ fn setup() -> Harness {
 #[test]
 fn initialize_sets_state() {
     let h = setup();
-    assert_eq!(h.client.admin(), h.admin);
+    assert!(h.client.is_signer(&h.admin));
     assert_eq!(h.client.discount_bps(), DISCOUNT_BPS);
     assert_eq!(h.client.available_liquidity(), 0);
 }
@@ -38,9 +55,10 @@ fn initialize_sets_state() {
 #[test]
 fn initialize_twice_fails() {
     let h = setup();
-    let other = Address::generate(&h.env);
+    let other = signers_of(&h.env, &[Address::generate(&h.env)]);
     assert_eq!(
-        h.client.try_initialize(&other, &500u32),
+        h.client
+            .try_initialize(&other, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS, &500u32),
         Err(Ok(Error::AlreadyInitialized))
     );
 }
@@ -51,9 +69,14 @@ fn initialize_rejects_discount_at_or_above_100pct() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
+    let signers = signers_of(&env, &[Address::generate(&env)]);
     assert_eq!(
-        client.try_initialize(&admin, &10_000u32),
+        client.try_initialize(
+            &signers,
+            &1u32,
+            &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
+            &10_000u32
+        ),
         Err(Ok(Error::InvalidDiscount))
     );
 }
@@ -152,7 +175,7 @@ fn fund_invoice_advances_discounted_amount() {
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
 
-    let advance = h.client.fund_invoice(&1u64, &1_000i128, &farmer);
+    let advance = h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     assert_eq!(advance, 900);
     assert_eq!(h.client.balance_of(&farmer), 900);
     assert_eq!(h.client.available_liquidity(), 9_100);
@@ -171,7 +194,7 @@ fn fund_invoice_requires_admin_auth() {
     let lp = Address::generate(&h.env);
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
-    h.client.fund_invoice(&1u64, &1_000i128, &farmer);
+    h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     assert_eq!(h.env.auths().first().unwrap().0, h.admin);
 }
 
@@ -184,7 +207,7 @@ fn fund_invoice_zero_face_value_fails() {
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
     assert_eq!(
-        h.client.try_fund_invoice(&1u64, &0i128, &farmer),
+        h.client.try_fund_invoice(&h.admin, &1u64, &0i128, &farmer),
         Err(Ok(Error::InvalidAmount))
     );
 }
@@ -196,7 +219,7 @@ fn fund_invoice_negative_face_value_fails() {
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
     assert_eq!(
-        h.client.try_fund_invoice(&1u64, &-100i128, &farmer),
+        h.client.try_fund_invoice(&h.admin, &1u64, &-100i128, &farmer),
         Err(Ok(Error::InvalidAmount))
     );
 }
@@ -209,9 +232,9 @@ fn fund_invoice_duplicate_id_fails() {
     let lp = Address::generate(&h.env);
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
-    h.client.fund_invoice(&1u64, &1_000i128, &farmer);
+    h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     assert_eq!(
-        h.client.try_fund_invoice(&1u64, &500i128, &farmer),
+        h.client.try_fund_invoice(&h.admin, &1u64, &500i128, &farmer),
         Err(Ok(Error::AlreadyFunded))
     );
     // Liquidity only reduced once.
@@ -228,7 +251,7 @@ fn fund_invoice_insufficient_liquidity_fails() {
     h.client.deposit(&lp, &500i128);
     // advance for 1000 face value is 900 > 500 available
     assert_eq!(
-        h.client.try_fund_invoice(&1u64, &1_000i128, &farmer),
+        h.client.try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
         Err(Ok(Error::InsufficientLiquidity))
     );
 }
@@ -269,7 +292,7 @@ fn farmer_can_withdraw_advanced_funds() {
     let lp = Address::generate(&h.env);
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
-    h.client.fund_invoice(&1u64, &1_000i128, &farmer);
+    h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     h.client.withdraw(&farmer, &900i128);
     assert_eq!(h.client.balance_of(&farmer), 0);
     // 10_000 deposited, 900 advanced out of the pool then withdrawn by the
@@ -324,7 +347,7 @@ fn withdraw_blocked_when_liquidity_locked_in_funding() {
     let lp = Address::generate(&h.env);
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &1_000i128);
-    h.client.fund_invoice(&1u64, &1_000i128, &farmer);
+    h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
 
     assert_eq!(h.client.balance_of(&lp), 1_000);
     assert_eq!(h.client.available_liquidity(), 100);
@@ -335,4 +358,85 @@ fn withdraw_blocked_when_liquidity_locked_in_funding() {
     // But the LP can withdraw up to the un-deployed remainder.
     h.client.withdraw(&lp, &100i128);
     assert_eq!(h.client.balance_of(&lp), 900);
+}
+
+// ---- role-based access control ---------------------------------------------
+
+#[test]
+fn liquidity_manager_role_can_fund_without_being_a_signer() {
+    let h = setup();
+    let lm = Address::generate(&h.env);
+    let lp = Address::generate(&h.env);
+    let farmer = Address::generate(&h.env);
+    h.client.deposit(&lp, &10_000i128);
+
+    assert_eq!(
+        h.client.try_fund_invoice(&lm, &1u64, &1_000i128, &farmer),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    h.client.grant_role(&h.admin, &Role::LiquidityManager, &lm);
+    h.client.fund_invoice(&lm, &1u64, &1_000i128, &farmer);
+    assert!(h.client.is_funded(&1u64));
+}
+
+#[test]
+fn non_admin_cannot_set_token_address() {
+    let h = setup();
+    let outsider = Address::generate(&h.env);
+    let token = Address::generate(&h.env);
+    assert_eq!(
+        h.client
+            .try_set_token_address(&outsider, &TokenContract::XLM, &token),
+        Err(Ok(Error::NotASigner))
+    );
+}
+
+#[test]
+fn pauser_can_pause_and_blocks_deposit() {
+    let h = setup();
+    let pauser = Address::generate(&h.env);
+    h.client.grant_role(&h.admin, &Role::Pauser, &pauser);
+    h.client.pause(&pauser);
+    assert!(h.client.is_paused());
+
+    let lp = Address::generate(&h.env);
+    assert_eq!(
+        h.client.try_deposit(&lp, &100i128),
+        Err(Ok(Error::ContractPaused))
+    );
+
+    h.client.unpause(&pauser);
+    h.client.deposit(&lp, &100i128);
+    assert_eq!(h.client.balance_of(&lp), 100);
+}
+
+#[test]
+fn admin_transfer_full_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(FinancingPoolContract, ());
+    let client = FinancingPoolContractClient::new(&env, &contract_id);
+
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let signers = signers_of(&env, &[s1.clone(), s2.clone()]);
+    client.initialize(
+        &signers,
+        &2u32,
+        &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
+        &DISCOUNT_BPS,
+    );
+
+    let new_signer = Address::generate(&env);
+    let new_signers = signers_of(&env, &[new_signer.clone()]);
+    client.propose_admin_transfer(&s1, &new_signers, &1u32);
+    client.confirm_admin_transfer(&s2);
+    env.ledger().with_mut(|li| {
+        li.sequence_number += MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
+    });
+    client.execute_admin_transfer(&s1);
+
+    assert!(!client.is_signer(&s1));
+    assert!(client.is_signer(&new_signer));
 }
