@@ -1,7 +1,40 @@
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
+/// Storage keys for contract addresses and reentrancy guard
+#[derive(Clone)]
+pub enum StorageKey {
+    Instance(Symbol),
+    InvoiceData(Symbol),
+    InvoiceStatus(Symbol),
+    InvoiceAuth0(Symbol),
+    NonceMeta(Symbol),
+    FinancingPoolAddress,
+    ReentrancyGuard,
+}
+
+impl StorageKey {
+    pub fn instance(name: &str) -> Self {
+        StorageKey::Instance(Symbol::new(&Env::default(), name))
+    }
+
+    pub fn invoice_data(invoice_id: &Symbol) -> Self {
+        StorageKey::InvoiceData(invoice_id.clone())
+    }
+
+    pub fn invoice_status(invoice_id: &Symbol) -> Self {
+        StorageKey::InvoiceStatus(invoice_id.clone())
+    }
+
+    pub fn invoice_auth0(invoice_id: &Symbol) -> Self {
+        StorageKey::InvoiceAuth0(invoice_id.clone())
+    }
+
+    pub fn nonce_meta(invoice_id: &Symbol) -> Self {
+        StorageKey::NonceMeta(invoice_id.clone())
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct InvoiceRecord {
     pub id: Symbol,
     pub borrower: Address,
@@ -60,34 +93,9 @@ impl NonceMeta {
 
 pub type SettlementNonce = NonceMeta;
 
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum StorageKey {
-    Instance(Symbol),
-    InvoiceStatus(Symbol),
-    InvoiceAuth0(Symbol),
-    InvoiceData(Symbol),
-    NonceMeta(Symbol),
-}
-
-impl StorageKey {
-    pub fn instance(name: &'static str) -> Self {
-        StorageKey::Instance(Symbol::new(&Env::default(), name))
-    }
-
-    pub fn invoice_status(id: &Symbol) -> Self {
-        StorageKey::InvoiceStatus(id.clone())
-    }
-
-    pub fn invoice_auth0(id: &Symbol) -> Self {
-        StorageKey::InvoiceAuth0(id.clone())
-    }
-
-    pub fn invoice_data(id: &Symbol) -> Self {
-        StorageKey::InvoiceData(id.clone())
-    }
-
-    pub fn nonce_meta(id: &Symbol) -> Self {
-        StorageKey::NonceMeta(id.clone())
-    }
+/// Reentrancy guard state
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReentrancyGuard {
+    Unlocked,
+    Locked,
 }

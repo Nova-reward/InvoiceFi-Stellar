@@ -10,6 +10,9 @@ pub enum FinancingPoolError {
     ZeroAmount = 4,
     NotActive = 5,
     InvalidStatus = 6,
+    ReentrancyDetected = 7,
+    TokenNotSet = 8,
+    TokenTransferFailed = 9,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

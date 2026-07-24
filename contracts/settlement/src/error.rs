@@ -12,6 +12,9 @@ pub enum SettlementError {
     InvoiceNotFound = 8,
     InvalidAuthType = 9,
     InsufficientFees = 10,
+    ReentrancyDetected = 11,
+    FinancingPoolNotSet = 12,
+    CrossContractCallFailed = 13,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
