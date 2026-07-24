@@ -8,7 +8,12 @@
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String,
-    Symbol,
+    Symbol, Vec,
+};
+
+use access_control::{
+    AcError, AccessControl, MultisigConfig, PendingAdminTransfer, Role,
+    MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
 };
 
 /// Lifecycle states for an invoice.
@@ -120,8 +125,6 @@ pub struct Approved {
 
 #[contracttype]
 enum DataKey {
-    /// Contract administrator authorized to drive state transitions.
-    Admin,
     /// Monotonic counter backing invoice id allocation.
     Counter,
     /// Invoice record keyed by id.
@@ -148,6 +151,44 @@ pub enum Error {
     InvalidDiscountRate = 9,
     TransferAfterRepayment = 10,
     NotApproved = 11,
+    /// Caller does not hold the role (or admin-signer superuser status)
+    /// required for this operation.
+    Unauthorized = 12,
+    /// Caller is not a current member of the admin signer set.
+    NotASigner = 13,
+    InvalidThreshold = 14,
+    DuplicateSigner = 15,
+    InvalidTimelock = 16,
+    ContractPaused = 17,
+    AlreadyPaused = 18,
+    NotPaused = 19,
+    NoPendingTransfer = 20,
+    AlreadyConfirmed = 21,
+    ThresholdNotMet = 22,
+    TimelockNotElapsed = 23,
+    CannotGrantAdminRole = 24,
+}
+
+impl From<AcError> for Error {
+    fn from(e: AcError) -> Self {
+        match e {
+            AcError::AlreadyInitialized => Error::AlreadyInitialized,
+            AcError::NotInitialized => Error::NotInitialized,
+            AcError::Unauthorized => Error::Unauthorized,
+            AcError::NotASigner => Error::NotASigner,
+            AcError::InvalidThreshold => Error::InvalidThreshold,
+            AcError::DuplicateSigner => Error::DuplicateSigner,
+            AcError::InvalidTimelock => Error::InvalidTimelock,
+            AcError::ContractPaused => Error::ContractPaused,
+            AcError::AlreadyPaused => Error::AlreadyPaused,
+            AcError::NotPaused => Error::NotPaused,
+            AcError::NoPendingTransfer => Error::NoPendingTransfer,
+            AcError::AlreadyConfirmed => Error::AlreadyConfirmed,
+            AcError::ThresholdNotMet => Error::ThresholdNotMet,
+            AcError::TimelockNotElapsed => Error::TimelockNotElapsed,
+            AcError::CannotGrantAdminRole => Error::CannotGrantAdminRole,
+        }
+    }
 }
 
 const MAX_DISCOUNT_BPS: u32 = 10_000;
@@ -160,13 +201,18 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
-    /// One-time initialization. `admin` is the only address permitted to drive
-    /// status transitions (funding, settlement, default).
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+    /// One-time initialization. `signers`/`threshold` define the n-of-m admin
+    /// signer set that drives status transitions (funding, settlement,
+    /// default); `timelock_ledgers` gates how long a signer-set change must
+    /// wait before it can execute (minimum
+    /// [`access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS`]).
+    pub fn initialize(
+        env: Env,
+        signers: Vec<Address>,
+        threshold: u32,
+        timelock_ledgers: u32,
+    ) -> Result<(), Error> {
+        AccessControl::initialize(&env, signers, threshold, timelock_ledgers)?;
         env.storage().instance().set(&DataKey::Counter, &0u64);
         Ok(())
     }
@@ -184,6 +230,7 @@ impl InvoiceContract {
         metadata: String,
     ) -> Result<u64, Error> {
         Self::require_initialized(&env)?;
+        AccessControl::require_not_paused(&env)?;
         owner.require_auth();
 
         if amount <= 0 {
@@ -214,15 +261,22 @@ impl InvoiceContract {
         Ok(next)
     }
 
-    /// Fund a pending invoice and mint its unique ownership token. Admin-only.
+    /// Fund a pending invoice and mint its unique ownership token. Requires
+    /// `caller` to hold the `LiquidityManager` role (or be an admin signer).
     ///
     /// This is the canonical `Pending -> Funded` transition: it records the
     /// funding discount and snapshots the token metadata (invoice id, face
     /// value, discount rate, due date). `discount_rate` is in basis points and
     /// must be below 100% (10_000 bps).
-    pub fn fund(env: Env, invoice_id: u64, discount_rate: u32) -> Result<(), Error> {
-        let admin = Self::admin_inner(&env)?;
-        admin.require_auth();
+    pub fn fund(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        discount_rate: u32,
+    ) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        AccessControl::require_role(&env, Role::LiquidityManager, &caller)?;
+        AccessControl::require_not_paused(&env)?;
 
         if discount_rate >= MAX_DISCOUNT_BPS {
             return Err(Error::InvalidDiscountRate);
@@ -273,6 +327,7 @@ impl InvoiceContract {
         spender: Address,
         invoice_id: u64,
     ) -> Result<(), Error> {
+        AccessControl::require_not_paused(&env)?;
         owner.require_auth();
 
         let invoice = Self::load(&env, invoice_id)?;
@@ -304,6 +359,7 @@ impl InvoiceContract {
     /// A repayment-settled invoice can no longer be transferred — the
     /// repayment claim has been discharged.
     pub fn transfer(env: Env, from: Address, to: Address, invoice_id: u64) -> Result<(), Error> {
+        AccessControl::require_not_paused(&env)?;
         from.require_auth();
 
         let invoice = Self::load(&env, invoice_id)?;
@@ -325,6 +381,7 @@ impl InvoiceContract {
         to: Address,
         invoice_id: u64,
     ) -> Result<(), Error> {
+        AccessControl::require_not_paused(&env)?;
         spender.require_auth();
 
         let invoice = Self::load(&env, invoice_id)?;
@@ -345,12 +402,19 @@ impl InvoiceContract {
         Self::do_transfer(&env, invoice, from, to, invoice_id)
     }
 
-    /// Drive an invoice through its lifecycle. Admin-only.
+    /// Drive an invoice through its lifecycle. Requires `caller` to be a
+    /// current admin signer.
     ///
     /// Rejects any transition not permitted by [`Status`].
-    pub fn update_status(env: Env, invoice_id: u64, new_status: Status) -> Result<(), Error> {
-        let admin = Self::admin_inner(&env)?;
-        admin.require_auth();
+    pub fn update_status(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        new_status: Status,
+    ) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        AccessControl::require_admin(&env, &caller)?;
+        AccessControl::require_not_paused(&env)?;
 
         let mut invoice = Self::load(&env, invoice_id)?;
         if !Self::transition_allowed(invoice.status, new_status) {
@@ -429,9 +493,86 @@ impl InvoiceContract {
             .has(&DataKey::Invoice(invoice_id))
     }
 
-    /// The configured administrator.
-    pub fn admin(env: Env) -> Result<Address, Error> {
-        Self::admin_inner(&env)
+    // ---- access control ---------------------------------------------------
+
+    /// The current admin signer set and threshold.
+    pub fn multisig(env: Env) -> Result<MultisigConfig, Error> {
+        Ok(AccessControl::multisig(&env)?)
+    }
+
+    /// Whether `addr` is a current admin signer.
+    pub fn is_signer(env: Env, addr: Address) -> bool {
+        AccessControl::is_signer(&env, &addr)
+    }
+
+    /// Whether `addr` holds `role` (admin signers hold every role).
+    pub fn has_role(env: Env, role: Role, addr: Address) -> bool {
+        AccessControl::has_role(&env, role, &addr)
+    }
+
+    /// Whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        AccessControl::is_paused(&env)
+    }
+
+    /// Grant `role` to `grantee`. Requires an admin signer. `Role::Admin`
+    /// cannot be granted this way — admin authority is defined solely by the
+    /// signer set (see [`propose_admin_transfer`]).
+    pub fn grant_role(env: Env, caller: Address, role: Role, grantee: Address) -> Result<(), Error> {
+        Ok(AccessControl::grant_role(&env, &caller, role, grantee)?)
+    }
+
+    /// Revoke `role` from `grantee`. Requires an admin signer.
+    pub fn revoke_role(env: Env, caller: Address, role: Role, grantee: Address) -> Result<(), Error> {
+        Ok(AccessControl::revoke_role(&env, &caller, role, grantee)?)
+    }
+
+    /// Pause the contract, blocking mint/fund/transfer/status updates.
+    /// Requires the `Pauser` role (or an admin signer).
+    pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
+        Ok(AccessControl::pause(&env, &caller)?)
+    }
+
+    /// Unpause the contract. Requires the `Pauser` role (or an admin signer).
+    pub fn unpause(env: Env, caller: Address) -> Result<(), Error> {
+        Ok(AccessControl::unpause(&env, &caller)?)
+    }
+
+    /// Propose a new admin signer set / threshold. Only a current signer may
+    /// propose; the proposer's confirmation is recorded automatically.
+    pub fn propose_admin_transfer(
+        env: Env,
+        caller: Address,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) -> Result<(), Error> {
+        Ok(AccessControl::propose_admin_transfer(
+            &env,
+            &caller,
+            new_signers,
+            new_threshold,
+        )?)
+    }
+
+    /// Add `caller`'s confirmation to the pending admin transfer.
+    pub fn confirm_admin_transfer(env: Env, caller: Address) -> Result<(), Error> {
+        Ok(AccessControl::confirm_admin_transfer(&env, &caller)?)
+    }
+
+    /// Execute the pending admin transfer once it has reached threshold and
+    /// the time-lock has elapsed.
+    pub fn execute_admin_transfer(env: Env, caller: Address) -> Result<(), Error> {
+        Ok(AccessControl::execute_admin_transfer(&env, &caller)?)
+    }
+
+    /// Withdraw the pending admin transfer without executing it.
+    pub fn cancel_admin_transfer(env: Env, caller: Address) -> Result<(), Error> {
+        Ok(AccessControl::cancel_admin_transfer(&env, &caller)?)
+    }
+
+    /// The pending admin transfer proposal, if any.
+    pub fn pending_admin_transfer(env: Env) -> Option<PendingAdminTransfer> {
+        AccessControl::pending_admin_transfer(&env)
     }
 
     // ---- internals -------------------------------------------------------
@@ -498,19 +639,9 @@ impl InvoiceContract {
             .ok_or(Error::InvoiceNotFound)
     }
 
-    fn admin_inner(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)
-    }
-
     fn require_initialized(env: &Env) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            Ok(())
-        } else {
-            Err(Error::NotInitialized)
-        }
+        AccessControl::multisig(env)?;
+        Ok(())
     }
 }
 
