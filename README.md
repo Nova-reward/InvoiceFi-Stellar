@@ -56,6 +56,10 @@ website rediflow-stellar-capital.lovable.app
 - PostgreSQL (Database)
 - Prisma ORM
 
+## Security documentation
+
+[Protocol threat model](docs/security/threat-model.md)
+
 ---
 
 ## Architecture
