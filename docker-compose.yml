@@ -16,6 +16,10 @@ version: "3.9"
 #   Start:  docker compose up --build
 #   Stop:   docker compose down
 #   Purge:  docker compose down -v   (removes all volumes)
+#
+#   E2E Test profile:
+#     docker compose --profile test up --build
+#     docker compose --profile test down -v
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -190,6 +194,32 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    networks:
+      - invoicefi_net
+
+  # ── E2E Test Runner (test profile only) ───────────────────────────────────
+  # Starts automatically with: docker compose --profile test up --build
+  # Provisions accounts, deploys contracts, and runs the Playwright test suite.
+  e2e-runner:
+    profiles:
+      - test
+    build:
+      context: ./tests/e2e
+      dockerfile: Dockerfile
+    container_name: invoicefi_e2e
+    environment:
+      BASE_URL:           http://frontend:3000
+      API_URL:            http://backend:4000
+      HORIZON_URL:        http://stellar-standalone:8000
+      SOROBAN_RPC_URL:    http://stellar-standalone:8001
+      NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+      stellar-standalone:
+        condition: service_started
     networks:
       - invoicefi_net
 

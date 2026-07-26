@@ -1,0 +1,18 @@
+{
+  "name": "invoicefi-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "test:report": "playwright show-report",
+    "setup": "node scripts/provision-accounts.mjs",
+    "setup:contracts": "node scripts/deploy-contracts.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@stellar/stellar-sdk": "^13.0.0"
+  }
+}
