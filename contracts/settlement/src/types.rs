@@ -4,20 +4,19 @@ use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
-    Instance(Symbol),
     InvoiceData(Symbol),
     InvoiceStatus(Symbol),
     InvoiceAuth0(Symbol),
     NonceMeta(Symbol),
     FinancingPoolAddress,
     ReentrancyGuard,
+    FeeRate,
+    CollectedFees,
+    WithdrawnFees,
+    EscrowPubKey,
 }
 
 impl StorageKey {
-    pub fn instance(name: &str) -> Self {
-        StorageKey::Instance(Symbol::new(&Env::default(), name))
-    }
-
     pub fn invoice_data(invoice_id: &Symbol) -> Self {
         StorageKey::InvoiceData(invoice_id.clone())
     }
@@ -63,10 +62,10 @@ pub struct NonceMeta {
 }
 
 impl NonceMeta {
-    pub fn new(invoice_id: Symbol, due_date: u64) -> Self {
+    pub fn new(e: &Env, invoice_id: Symbol, due_date: u64) -> Self {
         NonceMeta {
             invoice_id,
-            used_nonces: Vec::new(&Env::default()),
+            used_nonces: Vec::new(e),
             due_date,
         }
     }
@@ -76,7 +75,7 @@ impl NonceMeta {
         if let Some(meta) = e.storage().persistent().get(&key) {
             return meta;
         }
-        NonceMeta::new(invoice_id.clone(), 0)
+        NonceMeta::new(e, invoice_id.clone(), 0)
     }
 
     pub fn mark_used(&mut self, _e: &Env, nonce: u64) {

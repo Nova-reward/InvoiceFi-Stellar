@@ -65,6 +65,9 @@ jobs:
       - name: Run storage key convention linter
         run: bash scripts/check-storage-keys.sh
 
+      - name: Run checked math linter
+        run: bash scripts/check-unchecked-math.sh
+
   simulate:
     name: Contract Simulation
     needs: detect
