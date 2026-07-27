@@ -5,6 +5,7 @@ members = [
     "financing-pool",
     "settlement",
     "access-control",
+    "common",
 ]
 
 [workspace.package]

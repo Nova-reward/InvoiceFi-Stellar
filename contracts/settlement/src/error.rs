@@ -31,6 +31,19 @@ pub enum SettlementError {
     ThresholdNotMet = 25,
     TimelockNotElapsed = 26,
     CannotGrantAdminRole = 27,
+    Overflow = 28,
+    Underflow = 29,
+    DivisionByZero = 30,
+}
+
+impl From<common::CheckedMathError> for SettlementError {
+    fn from(e: common::CheckedMathError) -> Self {
+        match e {
+            common::CheckedMathError::Overflow => SettlementError::Overflow,
+            common::CheckedMathError::Underflow => SettlementError::Underflow,
+            common::CheckedMathError::DivisionByZero => SettlementError::DivisionByZero,
+        }
+    }
 }
 
 impl From<access_control::AcError> for SettlementError {
