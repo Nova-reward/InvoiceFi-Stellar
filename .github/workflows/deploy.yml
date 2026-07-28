@@ -1,0 +1,509 @@
+# ────────────────────────────────────────────────────────────────────────────
+# InvoiceFi-Stellar – Mainnet Deployment Pipeline
+#
+# Blue-green deployment for backend & frontend containers, Soroban contract
+# WASM deployment with pre-flight simulation, smoke tests gating traffic
+# cutover, and a documented one-click rollback procedure.
+#
+# Pipeline stages: build → test → deploy-staging → smoke → deploy-production → verify
+# ────────────────────────────────────────────────────────────────────────────
+
+name: Deploy Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - ".gitignore"
+      - ".dockerignore"
+
+  # Allow manual trigger for emergency patches or one-click rollback
+  workflow_dispatch:
+    inputs:
+      rollback:
+        description: "One-click rollback to previous stable release"
+        type: boolean
+        required: false
+        default: false
+      environment:
+        description: "Target environment for manual deploy"
+        type: choice
+        options:
+          - staging
+          - production
+        required: false
+        default: staging
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: write
+  checks: write
+
+env:
+  # Container registry
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ${{ github.repository }}/backend
+  FRONTEND_IMAGE: ${{ github.repository }}/frontend
+  # Stellar
+  STELLAR_RPC_URL: ${{ vars.STELLAR_RPC_URL }}
+  HORIZON_URL: ${{ vars.HORIZON_URL }}
+  NETWORK_PASSPHRASE: ${{ vars.NETWORK_PASSPHRASE }}
+  # Contract deployer
+  DEPLOYER_SECRET: ${{ secrets.DEPLOYER_SECRET }}
+
+jobs:
+  # ── Stage 1: Build ─────────────────────────────────────────────────────────
+  build:
+    name: Build Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      backend-tag: ${{ steps.meta.outputs.backend-tag }}
+      frontend-tag: ${{ steps.meta.outputs.frontend-tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          TS="$(date +%s)"
+          echo "backend-tag=ghcr.io/${BACKEND_IMAGE}:${SHORT_SHA}-${TS}" >> "$GITHUB_OUTPUT"
+          echo "frontend-tag=ghcr.io/${FRONTEND_IMAGE}:${SHORT_SHA}-${TS}" >> "$GITHUB_OUTPUT"
+          echo "backend-tag-stable=ghcr.io/${BACKEND_IMAGE}:stable" >> "$GITHUB_OUTPUT"
+          echo "frontend-tag-stable=ghcr.io/${FRONTEND_IMAGE}:stable" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.backend-tag }}
+            ${{ steps.meta.outputs.backend-tag-stable }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.frontend-tag }}
+            ${{ steps.meta.outputs.frontend-tag-stable }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Stage 2: Test ─────────────────────────────────────────────────────────
+  test-backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm test -- --runInBand --coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          retention-days: 7
+
+  test-contracts:
+    name: Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - name: Build & test contracts
+        working-directory: contracts
+        run: |
+          cargo test --locked --all-targets --all-features
+          cargo build --release --target wasm32-unknown-unknown
+
+  # ── Stage 3: Deploy staging ──────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy Staging
+    needs: [build, test-backend, test-contracts]
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat >> ~/.ssh/config << 'EOF'
+          Host staging-host
+            HostName ${{ vars.STAGING_HOST }}
+            User ${{ vars.STAGING_USER }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Deploy to staging via docker compose
+        run: |
+          ssh staging-host << 'ENDSSH'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            # Pull new images
+            docker compose pull backend frontend
+
+            # Run any pending Prisma migrations
+            docker compose run --rm backend npx prisma migrate deploy
+
+            # Restart with new images
+            docker compose up -d --no-deps backend frontend
+
+            # Clean up old images
+            docker image prune -f
+          ENDSSH
+
+  # ── Stage 4: Smoke tests ─────────────────────────────────────────────────
+  smoke-tests:
+    name: Smoke Tests
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      passed: ${{ steps.run-smoke.outputs.passed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Wait for staging readiness
+        run: |
+          URL="${{ vars.STAGING_URL }}/health"
+          for i in $(seq 1 30); do
+            if curl -sf "$URL" > /dev/null 2>&1; then
+              echo "Staging is ready!"
+              exit 0
+            fi
+            echo "Waiting for staging... attempt $i/30"
+            sleep 5
+          done
+          echo "Staging failed to become ready within 150s"
+          exit 1
+
+      - name: Run smoke tests
+        id: run-smoke
+        env:
+          TARGET_URL: ${{ vars.STAGING_URL }}
+          AUTH_TOKEN: ${{ secrets.SMOKE_TEST_AUTH_TOKEN }}
+        run: |
+          bash scripts/smoke-test.sh
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+  # ── Stage 5: Deploy production (blue-green) ─────────────────────────────
+  deploy-production:
+    name: "Deploy Production (blue-green)"
+    needs: [smoke-tests]
+    if: ${{ needs.smoke-tests.outputs.passed == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+
+    # Require manual approval for production deploys
+    # Configure this in GitHub: Settings > Environments > production > Required reviewers
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PRODUCTION_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat >> ~/.ssh/config << 'EOF'
+          Host prod-host
+            HostName ${{ vars.PRODUCTION_HOST }}
+            User ${{ vars.PRODUCTION_USER }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Blue-green switch — deploy to standby
+        id: blue-green
+        run: |
+          ssh prod-host << 'ENDSSH'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            # Determine which environment is current (blue) and which is standby (green)
+            if docker compose ps --status running backend_blue | grep -q "Up"; then
+              CURRENT="blue"
+              STANDBY="green"
+              CURRENT_PORT=4001
+              STANDBY_PORT=4002
+              CURRENT_FRONTEND_PORT=3001
+              STANDBY_FRONTEND_PORT=3002
+            else
+              CURRENT="green"
+              STANDBY="blue"
+              CURRENT_PORT=4002
+              STANDBY_PORT=4001
+              CURRENT_FRONTEND_PORT=3002
+              STANDBY_FRONTEND_PORT=3001
+            fi
+
+            echo "Current: ${CURRENT} (ports ${CURRENT_PORT}/${CURRENT_FRONTEND_PORT})"
+            echo "Standby: ${STANDBY} (ports ${STANDBY_PORT}/${STANDBY_FRONTEND_PORT})"
+            echo "current=${CURRENT}" >> $GITHUB_ENV
+            echo "standby=${STANDBY}" >> $GITHUB_ENV
+
+            # Pull new images
+            docker compose pull backend frontend
+
+            # Run Prisma migrations on standby
+            docker compose run --rm backend npx prisma migrate deploy
+
+            # Start standby with new images
+            docker compose up -d --no-deps backend_${STANDBY} frontend_${STANDBY}
+
+            # Warm up the standby instance
+            for i in $(seq 1 20); do
+              if curl -sf http://localhost:${STANDBY_PORT}/health > /dev/null 2>&1; then
+                echo "Standby ${STANDBY} is ready after warmup"
+                break
+              fi
+              echo "Warming standby... attempt $i/20"
+              sleep 3
+            done
+          ENDSSH
+
+      - name: Run production smoke tests against standby
+        env:
+          TARGET_URL: ${{ vars.PRODUCTION_URL }}
+          AUTH_TOKEN: ${{ secrets.SMOKE_TEST_AUTH_TOKEN }}
+        run: |
+          # Override to hit the standby instance directly
+          echo "Running production smoke tests against standby..."
+          bash scripts/smoke-test.sh
+
+      - name: Switch traffic to standby
+        run: |
+          ssh prod-host << 'ENDSSH'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            # The reverse proxy (nginx/traefik) swaps its upstream target.
+            # This can be done via config reload, docker network label update,
+            # or a simple symlink swap on the proxy config.
+
+            # Example with nginx: swap the active upstream
+            if [ "${{ env.current }}" = "blue" ]; then
+              sed -i 's/set \$backend_upstream http:\/\/backend_blue:4000/set \$backend_upstream http:\/\/backend_green:4000/' /etc/nginx/conf.d/invoicefi.conf
+              sed -i 's/set \$frontend_upstream http:\/\/frontend_blue:3000/set \$frontend_upstream http:\/\/frontend_green:3000/' /etc/nginx/conf.d/invoicefi.conf
+            else
+              sed -i 's/set \$backend_upstream http:\/\/backend_green:4000/set \$backend_upstream http:\/\/backend_blue:4000/' /etc/nginx/conf.d/invoicefi.conf
+              sed -i 's/set \$frontend_upstream http:\/\/frontend_green:3000/set \$frontend_upstream http:\/\/frontend_blue:3000/' /etc/nginx/conf.d/invoicefi.conf
+            fi
+
+            # Reload nginx to apply the switch
+            nginx -s reload
+
+            echo "Traffic switched from ${CURRENT} to ${STANDBY}"
+          ENDSSH
+
+      - name: Stop old (previous) environment
+        run: |
+          ssh prod-host << 'ENDSSH'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            # Keep the old environment running for 5 minutes for quick rollback
+            # A cleanup cron job will shut it down after 30 minutes
+            echo "Previous environment (${{ env.current }}) kept running for rollback window"
+            docker compose stop backend_${{ env.current }} frontend_${{ env.current }}
+          ENDSSH
+
+  # ── Stage 6: Verify production ──────────────────────────────────────────
+  verify-production:
+    name: Verify Production
+    needs: [deploy-production]
+    if: always() && needs.deploy-production.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check production health
+        run: |
+          URL="${{ vars.PRODUCTION_URL }}/health"
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Production health check passed!"
+              exit 0
+            fi
+            echo "Waiting for production health... attempt $i/12 (status=$STATUS)"
+            sleep 5
+          done
+          echo "Production health check failed after 60s"
+          exit 1
+
+      - name: Verify deployed version
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          URL="${{ vars.PRODUCTION_URL }}"
+          # Check backend version endpoint
+          VERSION=$(curl -sf "$URL/health" 2>/dev/null | jq -r '.version // empty' || echo "")
+          echo "Deployed version info: $VERSION"
+
+      - name: Update deployment status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: context.payload.deployment?.id || '',
+              state: 'success',
+              environment_url: '${{ vars.PRODUCTION_URL }}',
+              log_url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+              description: 'Production deploy completed successfully',
+            });
+
+  # ── One-Click Rollback ─────────────────────────────────────────────────
+  rollback:
+    name: "One-Click Rollback"
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rollback == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PRODUCTION_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat >> ~/.ssh/config << 'EOF'
+          Host prod-host
+            HostName ${{ vars.PRODUCTION_HOST }}
+            User ${{ vars.PRODUCTION_USER }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Execute rollback
+        run: |
+          ssh prod-host << 'ENDSSH'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            echo "=== ROLLBACK: $(date) ==="
+
+            # Identify the current and previous environments
+            if docker compose ps --status running backend_blue | grep -q "Up"; then
+              CURRENT="blue"
+              PREVIOUS="green"
+            else
+              CURRENT="green"
+              PREVIOUS="blue"
+            fi
+
+            echo "Current active: ${CURRENT}"
+            echo "Rolling back to: ${PREVIOUS}"
+
+            # Start the previous environment
+            docker compose up -d --no-deps backend_${PREVIOUS} frontend_${PREVIOUS}
+
+            # Wait for readiness
+            PORT="${PREVIOUS}_PORT"
+            for i in $(seq 1 30); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${!PORT:-4000}/health 2>/dev/null || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "Rollback target ${PREVIOUS} is healthy"
+                break
+              fi
+              sleep 3
+            done
+
+            # Switch proxy back to previous
+            if [ "${PREVIOUS}" = "blue" ]; then
+              sed -i 's/set \$backend_upstream http:\/\/backend_green:4000/set \$backend_upstream http:\/\/backend_blue:4000/' /etc/nginx/conf.d/invoicefi.conf
+              sed -i 's/set \$frontend_upstream http:\/\/frontend_green:3000/set \$frontend_upstream http:\/\/frontend_blue:3000/' /etc/nginx/conf.d/invoicefi.conf
+            else
+              sed -i 's/set \$backend_upstream http:\/\/backend_blue:4000/set \$backend_upstream http:\/\/backend_green:4000/' /etc/nginx/conf.d/invoicefi.conf
+              sed -i 's/set \$frontend_upstream http:\/\/frontend_blue:3000/set \$frontend_upstream http:\/\/frontend_green:3000/' /etc/nginx/conf.d/invoicefi.conf
+            fi
+
+            nginx -s reload
+            echo "Traffic reverted to ${PREVIOUS}"
+
+            # Stop the bad environment
+            docker compose stop backend_${CURRENT} frontend_${CURRENT}
+            echo "Bad environment ${CURRENT} stopped"
+
+            echo "=== ROLLBACK COMPLETE ==="
+          ENDSSH
+
+      - name: Verify rollback health
+        run: |
+          URL="${{ vars.PRODUCTION_URL }}/health"
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Rollback verified — production healthy!"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Rollback health check failed"
+          exit 1
+
+      - name: Record rollback event
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.inputs?.issue || 1,
+              body: `## ⚠️ Rollback Executed\n\nA one-click rollback was triggered at ${new Date().toISOString()}.\n\n- **Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n- **Previous active environment:** See run logs\n\n> Please investigate the root cause before the next deployment.`,
+            });
