@@ -1,14 +1,31 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SorobanService } from '../soroban/soroban.service';
 import { ContractError, ContractErrorCode } from '../common/contract-error';
 import { FundInvoiceDto } from './dto/funding.dto';
+import { FallbackStrategyService } from '../oracle-monitor/fallback-strategy.service';
 
 @Injectable()
 export class FinancingPoolService {
-  constructor(private prisma: PrismaService, private soroban: SorobanService) {}
+  private readonly logger = new Logger(FinancingPoolService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private soroban: SorobanService,
+    @Optional() private fallbackStrategy?: FallbackStrategyService,
+  ) {}
 
   async fundInvoice(investorId: string, investorWallet: string, dto: FundInvoiceDto) {
+    // Guard: halt mode blocks all new fundings
+    if (this.fallbackStrategy?.shouldBlockFunding()) {
+      this.logger.warn(
+        `Funding blocked: oracle fallback halt mode active (investor=${investorId}, invoice=${dto.invoiceId})`,
+      );
+      throw new ServiceUnavailableException(
+        'New fundings are temporarily halted due to oracle data staleness. Please retry after oracle feeds recover.',
+      );
+    }
+
     const invoice = await this.prisma.invoice.findUnique({
       where: { id: dto.invoiceId },
       include: { funding: true },
@@ -31,6 +48,16 @@ export class FinancingPoolService {
       throw new ContractError(ContractErrorCode.InsufficientFunds, 'Funding amount exceeds invoice value');
     }
 
+    // Apply fallback risk premium if in last_known_good mode
+    let effectiveDiscountRate = dto.discountRate;
+    if (this.fallbackStrategy?.getActiveMode() === 'last_known_good') {
+      const premiumBps = this.fallbackStrategy.getRiskPremiumBps();
+      effectiveDiscountRate = this.fallbackStrategy.calculateEffectiveDiscountBps(dto.discountRate);
+      this.logger.log(
+        `Applying fallback risk premium: +${premiumBps}bps (discount ${dto.discountRate} -> ${effectiveDiscountRate}) for invoice ${dto.invoiceId}`,
+      );
+    }
+
     // Invoke on-chain contract when contractId is present
     if (invoice.contractId) {
       try {
@@ -50,7 +77,7 @@ export class FinancingPoolService {
           invoiceId: invoice.id,
           investorId,
           amount: dto.amount,
-          discountRate: dto.discountRate,
+          discountRate: effectiveDiscountRate,
         },
       }),
       this.prisma.invoice.update({

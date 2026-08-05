@@ -7,6 +7,7 @@ import { InvoicesModule } from './invoices/invoices.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SettlementModule } from './settlement/settlement.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
+import { OracleMonitorModule } from './oracle-monitor/oracle-monitor.module';
 import { VaultModule } from './config/vault/vault.module';
 import { RedisService } from './common/redis.service';
 import { RateLimiterService } from './common/rate-limiter.service';
@@ -26,6 +27,7 @@ import { RateLimitMiddleware } from './common/rate-limit.middleware';
     InvoicesModule,
     ComplianceModule,
     HealthModule,
+    OracleMonitorModule,
   ],
   providers: [RedisService, RateLimiterService, CircuitBreakerService],
 })
