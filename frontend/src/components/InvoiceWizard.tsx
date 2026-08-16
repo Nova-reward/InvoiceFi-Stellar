@@ -105,10 +105,11 @@ export function InvoiceWizard() {
   const onFinalConfirm = handleSubmit(() => {
     setHasSubmitted(true);
     setCurrentStep('submitted');
-    const freighterAvailable = typeof window !== 'undefined' && 'FreighterApi' in window;
-    if (freighterAvailable) {
-      alert('Freighter signing prompt triggered for final confirmation.');
-    }
+    // TODO: replace alert with actual signTransaction() call via the active WalletAdapter
+    const adapterName = typeof window !== 'undefined'
+      ? sessionStorage.getItem('walletAdapterName') ?? 'wallet'
+      : 'wallet';
+    alert(`${adapterName} signing prompt triggered for final confirmation.`);
   });
 
   const renderStepContent = () => {
