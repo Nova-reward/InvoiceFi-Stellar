@@ -61,7 +61,8 @@ describe('InvestorPortfolioTable Accessibility', () => {
     const sortableHeaders = container.querySelectorAll('th.sortable')
 
     sortableHeaders.forEach((header) => {
-      expect(header).toHaveAttribute('role', 'button')
+      // Sortable headers are keyboard-focusable and announce their sort state
+      // via aria-sort (allowed on the implicit columnheader role).
       expect(header).toHaveAttribute('tabindex', '0')
       expect(header).toHaveAttribute('aria-sort')
     })

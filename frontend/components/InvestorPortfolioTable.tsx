@@ -143,16 +143,15 @@ export default function InvestorPortfolioTable({ invoices }: Props) {
       </div>
 
       <div className="table-wrapper">
-        <table role="grid" aria-label="Investment portfolio">
+        <table aria-label="Investment portfolio">
           <caption className="sr-only">List of funded invoices with amounts, rates, and status</caption>
           <thead>
-            <tr role="row">
+            <tr>
               <th scope="col">Invoice ID</th>
               <th scope="col">Farmer</th>
               <th scope="col">Crop Type</th>
               <th
                 scope="col"
-                role="button"
                 tabIndex={0}
                 onClick={() => handleSort('fundedAmount')}
                 onKeyDown={(e) => handleSortKeypress('fundedAmount', e)}
@@ -163,7 +162,6 @@ export default function InvestorPortfolioTable({ invoices }: Props) {
               </th>
               <th
                 scope="col"
-                role="button"
                 tabIndex={0}
                 onClick={() => handleSort('discountRate')}
                 onKeyDown={(e) => handleSortKeypress('discountRate', e)}
@@ -174,7 +172,6 @@ export default function InvestorPortfolioTable({ invoices }: Props) {
               </th>
               <th
                 scope="col"
-                role="button"
                 tabIndex={0}
                 onClick={() => handleSort('expectedReturn')}
                 onKeyDown={(e) => handleSortKeypress('expectedReturn', e)}
@@ -185,7 +182,6 @@ export default function InvestorPortfolioTable({ invoices }: Props) {
               </th>
               <th
                 scope="col"
-                role="button"
                 tabIndex={0}
                 onClick={() => handleSort('dueDate')}
                 onKeyDown={(e) => handleSortKeypress('dueDate', e)}
