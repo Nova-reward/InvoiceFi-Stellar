@@ -6,6 +6,7 @@ members = [
     "settlement",
     "access-control",
     "upgrade_test_framework",
+    "oracle",
 ]
 
 [workspace.package]
