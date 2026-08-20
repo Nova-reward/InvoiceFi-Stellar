@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { withRetry } from '../common/retry';
+import { YieldGateService } from '../oracle/yield-gate.service';
 import { parseSettlementEvent } from './settlement-event.parser';
 import { SettlementResult, SettlementService } from './settlement.service';
 import { SorobanEventsService } from './soroban-events.service';
@@ -35,6 +36,7 @@ export class SettlementSyncService implements OnModuleInit {
     private readonly settlement: SettlementService,
     private readonly cursor: SyncCursorService,
     private readonly schedulerRegistry: SchedulerRegistry,
+    private readonly yieldGate: YieldGateService,
     config: ConfigService,
   ) {
     this.pollIntervalMs = Number(
@@ -93,6 +95,22 @@ export class SettlementSyncService implements OnModuleInit {
       }
 
       processed++;
+
+      // Optional yield-attestation gate: no-op (returns true) unless both
+      // YIELD_GATE_ENABLED=true and this invoice is associated with a
+      // crop/season — see YieldGateService. A blocked invoice is *not* a
+      // failure: it's held at the last good ledger and re-checked next
+      // cycle, exactly like the retry-exhausted path below, so it settles
+      // as soon as reconciliation produces a usable attestation without
+      // ever being skipped.
+      if (!(await this.yieldGate.isSettlementAllowed(parsed.invoiceId))) {
+        this.logger.warn(
+          `Invoice ${parsed.invoiceId} settlement deferred: awaiting a reconciled yield attestation`,
+        );
+        await this.cursor.setLastLedger(Math.max(0, safeLedger));
+        return { processed, settled };
+      }
+
       try {
         const result = await withRetry(
           () => this.settlement.settleInvoice(parsed.invoiceId, parsed.ledger),
