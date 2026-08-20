@@ -196,7 +196,10 @@ fn initialize_sets_multisig_and_unpauses() {
     assert_eq!(cfg.threshold, 2);
     assert_eq!(cfg.signers, s.signers);
     assert!(!s.client.is_paused());
-    assert_eq!(s.client.timelock_ledgers(), MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS);
+    assert_eq!(
+        s.client.timelock_ledgers(),
+        MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS
+    );
 }
 
 #[test]
@@ -204,7 +207,8 @@ fn initialize_twice_fails() {
     let s = setup();
     let extra = addr_vec(&s.env, &[signer(&s, 0)]);
     assert_eq!(
-        s.client.try_init(&extra, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS),
+        s.client
+            .try_init(&extra, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS),
         Err(Ok(TestError::AlreadyInitialized))
     );
 }
@@ -270,10 +274,12 @@ fn admin_signer_can_grant_and_revoke_operational_role() {
     let oracle = Address::generate(&s.env);
 
     assert!(!s.client.has_role(&Role::OracleWriter, &oracle));
-    s.client.grant_role(&signer(&s, 0), &Role::OracleWriter, &oracle);
+    s.client
+        .grant_role(&signer(&s, 0), &Role::OracleWriter, &oracle);
     assert!(s.client.has_role(&Role::OracleWriter, &oracle));
 
-    s.client.revoke_role(&signer(&s, 0), &Role::OracleWriter, &oracle);
+    s.client
+        .revoke_role(&signer(&s, 0), &Role::OracleWriter, &oracle);
     assert!(!s.client.has_role(&Role::OracleWriter, &oracle));
 }
 
@@ -294,7 +300,8 @@ fn admin_role_cannot_be_granted_directly() {
     let s = setup();
     let grantee = Address::generate(&s.env);
     assert_eq!(
-        s.client.try_grant_role(&signer(&s, 0), &Role::Admin, &grantee),
+        s.client
+            .try_grant_role(&signer(&s, 0), &Role::Admin, &grantee),
         Err(Ok(TestError::CannotGrantAdminRole))
     );
 }
@@ -363,20 +370,29 @@ fn signer_can_pause_without_explicit_pauser_role() {
 fn pause_twice_fails() {
     let s = setup();
     s.client.pause(&signer(&s, 0));
-    assert_eq!(s.client.try_pause(&signer(&s, 0)), Err(Ok(TestError::AlreadyPaused)));
+    assert_eq!(
+        s.client.try_pause(&signer(&s, 0)),
+        Err(Ok(TestError::AlreadyPaused))
+    );
 }
 
 #[test]
 fn unpause_when_not_paused_fails() {
     let s = setup();
-    assert_eq!(s.client.try_unpause(&signer(&s, 0)), Err(Ok(TestError::NotPaused)));
+    assert_eq!(
+        s.client.try_unpause(&signer(&s, 0)),
+        Err(Ok(TestError::NotPaused))
+    );
 }
 
 #[test]
 fn outsider_cannot_pause() {
     let s = setup();
     let outsider = Address::generate(&s.env);
-    assert_eq!(s.client.try_pause(&outsider), Err(Ok(TestError::Unauthorized)));
+    assert_eq!(
+        s.client.try_pause(&outsider),
+        Err(Ok(TestError::Unauthorized))
+    );
 }
 
 // ---- time-locked n-of-m admin transfer ------------------------------------
@@ -472,7 +488,10 @@ fn cancel_clears_pending_transfer() {
 fn propose_replaces_prior_pending_transfer() {
     let s = setup();
     let first = addr_vec(&s.env, &[Address::generate(&s.env)]);
-    let second = addr_vec(&s.env, &[Address::generate(&s.env), Address::generate(&s.env)]);
+    let second = addr_vec(
+        &s.env,
+        &[Address::generate(&s.env), Address::generate(&s.env)],
+    );
 
     s.client.propose(&signer(&s, 0), &first, &1u32);
     s.client.propose(&signer(&s, 1), &second, &2u32);
@@ -491,4 +510,164 @@ fn propose_rejects_invalid_new_signer_set() {
         s.client.try_propose(&signer(&s, 0), &new_signers, &1u32),
         Err(Ok(TestError::InvalidThreshold))
     );
+}
+
+// ---- timelock audit (#151) -----------------------------------------------
+//
+// See docs/audits/access-control-timelock-audit.md for the write-up. These
+// three tests are the specific scenarios that issue asked for; the finding
+// this audit actually turned up (`has_role` not granting admin-signer
+// superuser status for non-`Admin` roles) is exercised by
+// `signer_holds_admin_role_and_every_operational_role_as_superuser` above,
+// not here — it isn't a timelock bug, but it's in the same file/audit scope.
+
+/// Claiming a fully-confirmed transfer one ledger before the timelock
+/// elapses returns the typed `TimelockNotElapsed` error, not a panic — and
+/// claiming it the very next ledger succeeds. This is the same guard
+/// `admin_transfer_full_flow` exercises in passing; this test isolates it
+/// and pins the exact off-by-one boundary.
+#[test]
+fn execute_before_timelock_elapses_returns_typed_error_not_panic() {
+    let s = setup();
+    let new_signers = addr_vec(&s.env, &[Address::generate(&s.env)]);
+
+    s.client.propose(&signer(&s, 0), &new_signers, &1u32);
+    s.client.confirm(&signer(&s, 1));
+
+    // One ledger short of the timelock: still rejected, as a typed error
+    // returned from `try_execute` — `try_` only succeeds in decoding an
+    // `Err` at all if the callee returned a `Result::Err` rather than
+    // panicking, so this assertion itself is proof it's not a panic.
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS - 1;
+    });
+    assert_eq!(
+        s.client.try_execute(&signer(&s, 0)),
+        Err(Ok(TestError::TimelockNotElapsed))
+    );
+    // Rejection didn't consume or clear the pending transfer.
+    assert!(s.client.pending_transfer().is_some());
+
+    // Exactly at the timelock: succeeds.
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += 1;
+    });
+    s.client.execute(&signer(&s, 0));
+    assert_eq!(s.client.multisig().signers, new_signers);
+}
+
+/// A second `propose_admin_transfer` before the first is claimed doesn't
+/// just overwrite the *record* (`propose_replaces_prior_pending_transfer`
+/// above already covers that) — it safely discards the first proposal's
+/// progress too: the first proposal's confirmations don't carry over and
+/// can't be combined with the second's, and the second proposal's timelock
+/// restarts from its own `proposed_at`, not the first's. Superseding a
+/// proposal that already had enough confirmations to execute must not let
+/// the replacement inherit that head start.
+#[test]
+fn second_proposal_before_first_is_claimed_does_not_inherit_its_progress() {
+    let s = setup();
+    let first_signers = addr_vec(&s.env, &[Address::generate(&s.env)]);
+    let second_signers = addr_vec(
+        &s.env,
+        &[Address::generate(&s.env), Address::generate(&s.env)],
+    );
+
+    // First proposal reaches full confirmation (2-of-2 available signers)
+    // and its timelock fully elapses — it is now immediately executable,
+    // but nobody executes it yet.
+    s.client.propose(&signer(&s, 0), &first_signers, &1u32);
+    s.client.confirm(&signer(&s, 1));
+    assert_eq!(s.client.pending_transfer().unwrap().confirmations.len(), 2);
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
+    });
+
+    // Second proposal supersedes it before that execution happens.
+    s.client.propose(&signer(&s, 2), &second_signers, &2u32);
+
+    let pending = s.client.pending_transfer().unwrap();
+    assert_eq!(pending.new_signers, second_signers);
+    // Only the new proposer's confirmation carries over — signer 0's and
+    // signer 1's confirmations of the *first* proposal are gone, not
+    // merged in.
+    assert_eq!(pending.confirmations.len(), 1);
+    assert!(pending.confirmations.contains(&signer(&s, 2)));
+
+    // Confirmations insufficient for the second proposal's own threshold
+    // (2), even though the elapsed time would satisfy the *first*
+    // proposal's timelock.
+    assert_eq!(
+        s.client.try_execute(&signer(&s, 0)),
+        Err(Ok(TestError::ThresholdNotMet))
+    );
+
+    // Reach threshold — but the second proposal's timelock restarted at
+    // its own `proposed_at`, so it has not elapsed yet even though the
+    // *first* proposal's timelock duration has long since passed.
+    s.client.confirm(&signer(&s, 0));
+    assert_eq!(
+        s.client.try_execute(&signer(&s, 0)),
+        Err(Ok(TestError::TimelockNotElapsed))
+    );
+
+    // Once the second proposal's own timelock elapses, it executes to
+    // *its* signer set — the first proposal's signers were never applied.
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
+    });
+    s.client.execute(&signer(&s, 0));
+    let cfg = s.client.multisig();
+    assert_eq!(cfg.signers, second_signers);
+    assert_eq!(cfg.threshold, 2);
+    for addr in first_signers.iter() {
+        assert!(!s.client.is_signer(&addr));
+    }
+}
+
+/// Reducing the signer set to a single signer (threshold 1-of-1) after the
+/// multisig has been active — and already used for a prior transfer — is
+/// accepted, executes through the same current-committee-threshold gate as
+/// any other transfer, and the resulting 1-of-1 committee is then fully
+/// usable for a subsequent transfer with just that one signer.
+#[test]
+fn threshold_reduced_to_one_after_multisig_active() {
+    let s = setup();
+    let sole_signer = Address::generate(&s.env);
+    let new_signers = addr_vec(&s.env, &[sole_signer.clone()]);
+
+    // The *current* 2-of-3 threshold gates execution, not the new 1-of-1
+    // threshold being proposed.
+    s.client.propose(&signer(&s, 0), &new_signers, &1u32);
+    assert_eq!(
+        s.client.try_execute(&signer(&s, 0)),
+        Err(Ok(TestError::ThresholdNotMet))
+    );
+    s.client.confirm(&signer(&s, 1));
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
+    });
+    s.client.execute(&signer(&s, 0));
+
+    let cfg = s.client.multisig();
+    assert_eq!(cfg.threshold, 1);
+    assert_eq!(cfg.signers, new_signers);
+    assert!(s.client.is_signer(&sole_signer));
+    for i in 0..3 {
+        assert!(!s.client.is_signer(&signer(&s, i)));
+    }
+
+    // The reduced 1-of-1 committee is fully functional: the sole signer
+    // alone can propose, auto-confirm, and (after the timelock) execute a
+    // further transfer — no confirmation from anyone else is possible or
+    // required, since `validate_signer_set` accepts `threshold == 1` for a
+    // single-signer set.
+    let next_signers = addr_vec(&s.env, &[Address::generate(&s.env)]);
+    s.client.propose(&sole_signer, &next_signers, &1u32);
+    assert_eq!(s.client.pending_transfer().unwrap().confirmations.len(), 1);
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
+    });
+    s.client.execute(&sole_signer);
+    assert_eq!(s.client.multisig().signers, next_signers);
 }

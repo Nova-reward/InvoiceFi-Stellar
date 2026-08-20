@@ -108,13 +108,9 @@ impl AccessControl {
             return Err(AcError::InvalidTimelock);
         }
 
-        env.storage().instance().set(
-            &AcKey::Multisig,
-            &MultisigConfig {
-                signers,
-                threshold,
-            },
-        );
+        env.storage()
+            .instance()
+            .set(&AcKey::Multisig, &MultisigConfig { signers, threshold });
         env.storage()
             .instance()
             .set(&AcKey::TimelockLedgers, &timelock_ledgers);
@@ -131,16 +127,27 @@ impl AccessControl {
     }
 
     pub fn has_role(env: &Env, role: Role, addr: &Address) -> bool {
-        if let Role::Admin = role {
-            return Self::is_signer(env, addr);
+        // A current admin signer is a superuser over every operational role
+        // (see `require_role`), and `Role::Admin` itself is defined solely
+        // by signer membership (it is never directly grantable), so in both
+        // cases signer status alone is sufficient.
+        if Self::is_signer(env, addr) {
+            return true;
         }
-        env.storage()
-            .instance()
-            .has(&AcKey::RoleHolder(role, addr.clone()))
+        match role {
+            Role::Admin => false,
+            _ => env
+                .storage()
+                .instance()
+                .has(&AcKey::RoleHolder(role, addr.clone())),
+        }
     }
 
     pub fn is_paused(env: &Env) -> bool {
-        env.storage().instance().get(&AcKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get(&AcKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn multisig(env: &Env) -> Result<MultisigConfig, AcError> {

@@ -4,12 +4,10 @@
 //! - `version() -> u32`  returns 2
 //! - `upgrade(new_wasm: BytesN<32>)` (admin-only)
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, Vec,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Vec};
 
-use access_control::{AccessControl, Role, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
-use financing_pool_contract::types::{ReentrancyGuard, StorageKey, TokenContract};
+use access_control::{AccessControl, Role};
+use financing_pool_contract::types::{ReentrancyGuard, StorageKey};
 
 // ── Replicate v1 types (identical XDR layout) ────────────────────────────────
 
@@ -70,16 +68,20 @@ impl FinancingPoolContractV2 {
             .instance()
             .set(&DataKey::DiscountBps, &discount_bps);
         env.storage().instance().set(&DataKey::Available, &0i128);
-        env.storage()
-            .instance()
-            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Unlocked);
+        env.storage().instance().set(
+            &StorageKey::reentrancy_guard(&env),
+            &ReentrancyGuard::Unlocked,
+        );
         Ok(())
     }
 
-    pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), financing_pool_contract::Error> {
+    pub fn deposit(
+        env: Env,
+        from: Address,
+        amount: i128,
+    ) -> Result<(), financing_pool_contract::Error> {
         Self::require_initialized(&env)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(financing_pool_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(financing_pool_contract::Error::from)?;
         from.require_auth();
         if amount <= 0 {
             return Err(financing_pool_contract::Error::InvalidAmount);
@@ -87,7 +89,7 @@ impl FinancingPoolContractV2 {
         let guard: ReentrancyGuard = env
             .storage()
             .instance()
-            .get(&StorageKey::reentrancy_guard())
+            .get(&StorageKey::reentrancy_guard(&env))
             .unwrap_or(ReentrancyGuard::Unlocked);
         if guard == ReentrancyGuard::Locked {
             return Err(financing_pool_contract::Error::ReentrancyDetected);
@@ -98,10 +100,13 @@ impl FinancingPoolContractV2 {
         Ok(())
     }
 
-    pub fn withdraw(env: Env, to: Address, amount: i128) -> Result<(), financing_pool_contract::Error> {
+    pub fn withdraw(
+        env: Env,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), financing_pool_contract::Error> {
         Self::require_initialized(&env)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(financing_pool_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(financing_pool_contract::Error::from)?;
         to.require_auth();
         if amount <= 0 {
             return Err(financing_pool_contract::Error::InvalidAmount);
@@ -109,7 +114,7 @@ impl FinancingPoolContractV2 {
         let guard: ReentrancyGuard = env
             .storage()
             .instance()
-            .get(&StorageKey::reentrancy_guard())
+            .get(&StorageKey::reentrancy_guard(&env))
             .unwrap_or(ReentrancyGuard::Unlocked);
         if guard == ReentrancyGuard::Locked {
             return Err(financing_pool_contract::Error::ReentrancyDetected);
@@ -137,12 +142,15 @@ impl FinancingPoolContractV2 {
         Self::require_initialized(&env)?;
         AccessControl::require_role(&env, Role::LiquidityManager, &caller)
             .map_err(financing_pool_contract::Error::from)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(financing_pool_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(financing_pool_contract::Error::from)?;
         if face_value <= 0 {
             return Err(financing_pool_contract::Error::InvalidAmount);
         }
-        if env.storage().persistent().has(&DataKey::Funding(invoice_id)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Funding(invoice_id))
+        {
             return Err(financing_pool_contract::Error::AlreadyFunded);
         }
         let advance = Self::advance_for(&env, face_value);
@@ -182,7 +190,10 @@ impl FinancingPoolContractV2 {
             .unwrap_or(0)
     }
 
-    pub fn get_funding(env: Env, invoice_id: u64) -> Result<Funding, financing_pool_contract::Error> {
+    pub fn get_funding(
+        env: Env,
+        invoice_id: u64,
+    ) -> Result<Funding, financing_pool_contract::Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Funding(invoice_id))
@@ -225,13 +236,11 @@ impl FinancingPoolContractV2 {
     }
 
     pub fn pause(env: Env, caller: Address) -> Result<(), financing_pool_contract::Error> {
-        Ok(AccessControl::pause(&env, &caller)
-            .map_err(financing_pool_contract::Error::from)?)
+        Ok(AccessControl::pause(&env, &caller).map_err(financing_pool_contract::Error::from)?)
     }
 
     pub fn unpause(env: Env, caller: Address) -> Result<(), financing_pool_contract::Error> {
-        Ok(AccessControl::unpause(&env, &caller)
-            .map_err(financing_pool_contract::Error::from)?)
+        Ok(AccessControl::unpause(&env, &caller).map_err(financing_pool_contract::Error::from)?)
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
