@@ -120,6 +120,10 @@ pub enum Error {
     CannotGrantAdminRole = 22,
     /// Oracle price feed is stale (older than MAX_PRICE_AGE_LEDGERS).
     StalePriceFeed = 23,
+    /// The BPS advance calculation (`face_value * multiplier`) would
+    /// overflow `i128` before the division is applied. See
+    /// `docs/audits/financing-pool-bps-overflow.md`.
+    Overflow = 24,
 }
 
 impl From<access_control::AcError> for Error {
@@ -372,7 +376,7 @@ impl FinancingPoolContract {
         // Staleness guard: refuse to fund if the oracle feed is too old.
         Self::require_fresh_price_feed(&env)?;
 
-        let advance = Self::advance_for(&env, face_value);
+        let advance = Self::advance_for(&env, face_value)?;
         let available = Self::available_inner(&env);
         if available < advance {
             return Err(Error::InsufficientLiquidity);
@@ -410,7 +414,7 @@ impl FinancingPoolContract {
         if face_value <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(Self::advance_for(&env, face_value))
+        Self::advance_for(&env, face_value)
     }
 
     /// Discount (in tokens) that would be retained on a given face value.
@@ -418,7 +422,7 @@ impl FinancingPoolContract {
         if face_value <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(face_value - Self::advance_for(&env, face_value))
+        Ok(face_value - Self::advance_for(&env, face_value)?)
     }
 
     pub fn balance_of(env: Env, addr: Address) -> i128 {
@@ -592,15 +596,24 @@ impl FinancingPoolContract {
 
     // ---- internals -------------------------------------------------------
 
-    fn advance_for(env: &Env, face_value: i128) -> i128 {
+    /// `face_value * (10_000 - discount_bps) / 10_000`, computed with a
+    /// checked multiplication so that a `face_value` large enough to
+    /// overflow `i128` *before* the division is applied returns
+    /// [`Error::Overflow`] instead of panicking or wrapping. See
+    /// `docs/audits/financing-pool-bps-overflow.md` for the analysis.
+    fn advance_for(env: &Env, face_value: i128) -> Result<i128, Error> {
         let bps: u32 = env
             .storage()
             .instance()
             .get(&DataKey::DiscountBps)
             .unwrap_or(0);
+        // `bps` is enforced < BPS_DENOMINATOR at `initialize`, so this is
+        // always in [1, 10_000] and never negative.
+        let multiplier = BPS_DENOMINATOR - bps as i128;
+        let scaled = face_value.checked_mul(multiplier).ok_or(Error::Overflow)?;
         // Floor division: any rounding loss is retained by the pool as extra
         // discount, never over-advanced to the recipient.
-        face_value * (BPS_DENOMINATOR - bps as i128) / BPS_DENOMINATOR
+        Ok(scaled / BPS_DENOMINATOR)
     }
 
     fn balance_inner(env: &Env, addr: &Address) -> i128 {
@@ -654,6 +667,8 @@ impl FinancingPoolContract {
     }
 }
 
+#[cfg(test)]
+mod bps_overflow_proptest;
 #[cfg(test)]
 mod reentrancy_tests;
 #[cfg(test)]

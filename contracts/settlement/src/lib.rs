@@ -244,6 +244,13 @@ impl SettlementTrait for SettlementContract {
     fn set_fee_rate(e: Env, caller: Address, fee_rate: u32) {
         unwrap_ac(&e, AccessControl::require_admin(&e, &caller));
 
+        // A fee rate at or above 100% (10_000 bps) would make `net =
+        // amount - fee` negative in `settle_invoice`. Reject it here rather
+        // than at settlement time.
+        if fee_rate > 10_000 {
+            panic_with_error!(&e, SettlementError::InvalidFeeRate);
+        }
+
         e.storage()
             .instance()
             .set(&StorageKey::instance(&e, "FEE_RATE"), &fee_rate);
@@ -533,7 +540,15 @@ impl SettlementTrait for SettlementContract {
             .instance()
             .get(&StorageKey::instance(&e, "FEE_RATE"))
             .unwrap_or(0);
-        let fee = (amount * fee_rate as i128) / 10000;
+        // Checked multiplication: an `amount` large enough to overflow
+        // `i128` before the basis-point division is applied returns a typed
+        // error instead of panicking or wrapping. See
+        // `docs/audits/financing-pool-bps-overflow.md`.
+        let scaled = match amount.checked_mul(fee_rate as i128) {
+            Some(v) => v,
+            None => panic_with_error!(&e, SettlementError::FeeCalculationOverflow),
+        };
+        let fee = scaled / 10000;
         let net = amount - fee;
 
         // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls

@@ -35,6 +35,13 @@ pub enum SettlementError {
     AttestationReplay = 29,
     EscrowPubkeyNotSet = 30,
     InvalidAttestationPayload = 31,
+    /// `fee_rate` passed to `set_fee_rate` exceeds `10_000` (100% in basis
+    /// points), which would make `settle_invoice`'s fee calculation
+    /// nonsensical (fee > amount).
+    InvalidFeeRate = 32,
+    /// The `amount * fee_rate` multiplication in `settle_invoice` would
+    /// overflow `i128` before the basis-point division is applied.
+    FeeCalculationOverflow = 33,
 }
 
 impl From<access_control::AcError> for SettlementError {
