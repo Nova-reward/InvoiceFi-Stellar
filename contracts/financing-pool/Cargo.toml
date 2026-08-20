@@ -15,3 +15,5 @@ access-control = { path = "../access-control" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+upgrade-test-framework = { path = "../upgrade_test_framework" }
+proptest = "1"

@@ -12,16 +12,16 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
-use access_control::{AccessControl, Role, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
+use access_control::{AccessControl, Role};
 
 // ── Replicate v1 types (identical XDR layout) ────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
-    Pending  = 0,
-    Funded   = 1,
-    Settled  = 2,
+    Pending = 0,
+    Funded = 1,
+    Settled = 2,
     Defaulted = 3,
 }
 
@@ -104,8 +104,7 @@ impl InvoiceContractV2 {
         metadata: String,
     ) -> Result<u64, invoice_contract::Error> {
         Self::require_initialized(&env)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(invoice_contract::Error::from)?;
         owner.require_auth();
         if amount <= 0 {
             return Err(invoice_contract::Error::InvalidAmount);
@@ -135,8 +134,7 @@ impl InvoiceContractV2 {
         Self::require_initialized(&env)?;
         AccessControl::require_role(&env, Role::LiquidityManager, &caller)
             .map_err(invoice_contract::Error::from)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(invoice_contract::Error::from)?;
         if discount_rate >= MAX_DISCOUNT_BPS {
             return Err(invoice_contract::Error::InvalidDiscountRate);
         }
@@ -167,10 +165,8 @@ impl InvoiceContractV2 {
         new_status: Status,
     ) -> Result<(), invoice_contract::Error> {
         Self::require_initialized(&env)?;
-        AccessControl::require_admin(&env, &caller)
-            .map_err(invoice_contract::Error::from)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
+        AccessControl::require_admin(&env, &caller).map_err(invoice_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(invoice_contract::Error::from)?;
         let mut invoice = Self::load(&env, invoice_id)?;
         if !Self::transition_allowed(invoice.status, new_status) {
             return Err(invoice_contract::Error::InvalidTransition);
@@ -186,8 +182,7 @@ impl InvoiceContractV2 {
         to: Address,
         invoice_id: u64,
     ) -> Result<(), invoice_contract::Error> {
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(invoice_contract::Error::from)?;
         from.require_auth();
         let invoice = Self::load(&env, invoice_id)?;
         if invoice.owner != from {
@@ -202,8 +197,7 @@ impl InvoiceContractV2 {
         spender: Address,
         invoice_id: u64,
     ) -> Result<(), invoice_contract::Error> {
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(invoice_contract::Error::from)?;
         owner.require_auth();
         let invoice = Self::load(&env, invoice_id)?;
         if !Self::is_tokenized_inner(&env, invoice_id) {
@@ -227,8 +221,7 @@ impl InvoiceContractV2 {
         to: Address,
         invoice_id: u64,
     ) -> Result<(), invoice_contract::Error> {
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
+        AccessControl::require_not_paused(&env).map_err(invoice_contract::Error::from)?;
         spender.require_auth();
         let invoice = Self::load(&env, invoice_id)?;
         if !Self::is_tokenized_inner(&env, invoice_id) {
@@ -262,7 +255,10 @@ impl InvoiceContractV2 {
         Ok(Self::load(&env, invoice_id)?.status)
     }
 
-    pub fn get_invoice_token(env: Env, invoice_id: u64) -> Result<InvoiceToken, invoice_contract::Error> {
+    pub fn get_invoice_token(
+        env: Env,
+        invoice_id: u64,
+    ) -> Result<InvoiceToken, invoice_contract::Error> {
         env.storage()
             .persistent()
             .get(&DataKey::Token(invoice_id))
@@ -302,19 +298,22 @@ impl InvoiceContractV2 {
         AccessControl::is_paused(&env)
     }
 
-    pub fn grant_role(env: Env, caller: Address, role: Role, grantee: Address) -> Result<(), invoice_contract::Error> {
+    pub fn grant_role(
+        env: Env,
+        caller: Address,
+        role: Role,
+        grantee: Address,
+    ) -> Result<(), invoice_contract::Error> {
         Ok(AccessControl::grant_role(&env, &caller, role, grantee)
             .map_err(invoice_contract::Error::from)?)
     }
 
     pub fn pause(env: Env, caller: Address) -> Result<(), invoice_contract::Error> {
-        Ok(AccessControl::pause(&env, &caller)
-            .map_err(invoice_contract::Error::from)?)
+        Ok(AccessControl::pause(&env, &caller).map_err(invoice_contract::Error::from)?)
     }
 
     pub fn unpause(env: Env, caller: Address) -> Result<(), invoice_contract::Error> {
-        Ok(AccessControl::unpause(&env, &caller)
-            .map_err(invoice_contract::Error::from)?)
+        Ok(AccessControl::unpause(&env, &caller).map_err(invoice_contract::Error::from)?)
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────

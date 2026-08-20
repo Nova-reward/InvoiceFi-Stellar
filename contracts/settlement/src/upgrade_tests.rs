@@ -16,8 +16,8 @@ use soroban_sdk::{
     Address, Env, Symbol,
 };
 
-use crate::{SettlementContract, SettlementContractClient, SettlementTrait};
 use crate::error::SettlementStatus;
+use crate::{SettlementContract, SettlementContractClient};
 use access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,10 +43,13 @@ fn deploy_v1() -> V1Harness<'static> {
     let mut signers = soroban_sdk::Vec::new(&env);
     signers.push_back(admin.clone());
     client.init(&signers, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS);
-    let client: SettlementContractClient<'static> = unsafe {
-        core::mem::transmute(client)
-    };
-    V1Harness { env, contract_id, client, admin }
+    let client: SettlementContractClient<'static> = unsafe { core::mem::transmute(client) };
+    V1Harness {
+        env,
+        contract_id,
+        client,
+        admin,
+    }
 }
 
 fn invoice_sym(env: &Env, s: &str) -> Symbol {
@@ -66,22 +69,11 @@ fn simulate_upgrade_to_v2<'a>(
 
 // ── Set up a usable invoice (for tests that need a full record) ───────────────
 
-fn plant_invoice(
-    h: &V1Harness,
-    id: &Symbol,
-    amount: i128,
-    due_date: u64,
-) -> (Address, Address) {
+fn plant_invoice(h: &V1Harness, id: &Symbol, amount: i128, due_date: u64) -> (Address, Address) {
     let borrower = Address::generate(&h.env);
     let financier = Address::generate(&h.env);
     h.client.set_invoice_data(
-        &h.admin,
-        id,
-        &borrower,
-        &financier,
-        &amount,
-        &due_date,
-        &0u32, // interest_rate
+        &h.admin, id, &borrower, &financier, &amount, &due_date, &0u32, // interest_rate
     );
     (borrower, financier)
 }
@@ -98,8 +90,6 @@ fn upgrade_preserves_invoice_record() {
     let due_date: u64 = 1_800_000_000;
     let (borrower, financier) = plant_invoice(&h, &id, 5_000, due_date);
 
-    let rec_v1 = h.client.get_invoice(&id).unwrap();
-
     let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
     assert_eq!(v2.version(), 2, "version() must return 2");
 
@@ -110,12 +100,24 @@ fn upgrade_preserves_invoice_record() {
     let rec_after = h.client.get_invoice(&id).unwrap();
 
     assert_eq!(rec_after.amount, 5_000, "amount mismatch after upgrade");
-    assert_eq!(rec_after.borrower, borrower, "borrower mismatch after upgrade");
-    assert_eq!(rec_after.financier, financier, "financier mismatch after upgrade");
-    assert_eq!(rec_after.due_date, due_date, "due_date mismatch after upgrade");
+    assert_eq!(
+        rec_after.borrower, borrower,
+        "borrower mismatch after upgrade"
+    );
+    assert_eq!(
+        rec_after.financier, financier,
+        "financier mismatch after upgrade"
+    );
+    assert_eq!(
+        rec_after.due_date, due_date,
+        "due_date mismatch after upgrade"
+    );
     assert_eq!(rec_after.principal_paid, 0, "principal_paid should be 0");
-    assert_eq!(rec_after.status, SettlementStatus::ApprovedForSettlement as u32,
-        "initial status must be ApprovedForSettlement");
+    assert_eq!(
+        rec_after.status,
+        SettlementStatus::ApprovedForSettlement as u32,
+        "initial status must be ApprovedForSettlement"
+    );
 }
 
 /// Partial settlement state (principal_paid, status) survives the upgrade.
@@ -127,21 +129,30 @@ fn upgrade_preserves_partial_settlement() {
     let (borrower, _financier) = plant_invoice(&h, &id, 10_000, due_date);
 
     // Partially settle: pay 3 000 out of 10 000.
-    h.client.settle_invoice(&borrower, &id, &1u64, &3_000i128, &1u32);
+    h.client
+        .settle_invoice(&borrower, &id, &1u64, &3_000i128, &1u32);
 
     let rec_partial = h.client.get_invoice(&id).unwrap();
     assert_eq!(rec_partial.principal_paid, 3_000);
-    assert_ne!(rec_partial.status, SettlementStatus::Settled as u32,
-        "invoice must not be fully settled yet");
+    assert_ne!(
+        rec_partial.status,
+        SettlementStatus::Settled as u32,
+        "invoice must not be fully settled yet"
+    );
 
-    let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
 
     // Read state back through v1 client (shared storage).
     let rec_after = h.client.get_invoice(&id).unwrap();
-    assert_eq!(rec_after.principal_paid, 3_000,
-        "principal_paid must survive upgrade");
-    assert_ne!(rec_after.status, SettlementStatus::Settled as u32,
-        "status must still reflect partial settlement after upgrade");
+    assert_eq!(
+        rec_after.principal_paid, 3_000,
+        "principal_paid must survive upgrade"
+    );
+    assert_ne!(
+        rec_after.status,
+        SettlementStatus::Settled as u32,
+        "status must still reflect partial settlement after upgrade"
+    );
 
     // Nonce 1 must still be consumed — replay must be rejected.
     assert!(
@@ -160,18 +171,24 @@ fn upgrade_preserves_fully_settled() {
     let (borrower, _financier) = plant_invoice(&h, &id, 5_000, due_date);
 
     // Fully settle in one payment.
-    h.client.settle_invoice(&borrower, &id, &1u64, &5_000i128, &1u32);
+    h.client
+        .settle_invoice(&borrower, &id, &1u64, &5_000i128, &1u32);
 
     let rec_settled = h.client.get_invoice(&id).unwrap();
     assert_eq!(rec_settled.status, SettlementStatus::Settled as u32);
 
-    let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
 
     let rec_after = h.client.get_invoice(&id).unwrap();
-    assert_eq!(rec_after.status, SettlementStatus::Settled as u32,
-        "Settled status must persist through upgrade");
-    assert_eq!(rec_after.principal_paid, 5_000,
-        "principal_paid must persist through upgrade");
+    assert_eq!(
+        rec_after.status,
+        SettlementStatus::Settled as u32,
+        "Settled status must persist through upgrade"
+    );
+    assert_eq!(
+        rec_after.principal_paid, 5_000,
+        "principal_paid must persist through upgrade"
+    );
 }
 
 /// Fee counters (collected_fees, withdrawn_fees) survive the upgrade.
@@ -186,12 +203,13 @@ fn upgrade_preserves_fee_counters() {
     h.client.set_fee_rate(&h.admin, &200u32);
 
     // Settle 5 000 → fee = 5 000 * 200 / 10 000 = 100
-    h.client.settle_invoice(&borrower, &id, &1u64, &5_000i128, &1u32);
+    h.client
+        .settle_invoice(&borrower, &id, &1u64, &5_000i128, &1u32);
 
     let fees_before = h.client.get_collected_fees().unwrap_or(0);
     assert_eq!(fees_before, 100, "collected_fees should be 100");
 
-    let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
 
     // Fees must survive.
     let fees_after = h.client.get_collected_fees().unwrap_or(0);
@@ -211,16 +229,19 @@ fn upgrade_preserves_nonces() {
     let (borrower, _financier) = plant_invoice(&h, &id, 10_000, due_date);
 
     // Consume nonces 1, 2, 3.
-    h.client.settle_invoice(&borrower, &id, &1u64, &1_000i128, &1u32);
-    h.client.settle_invoice(&borrower, &id, &2u64, &1_000i128, &1u32);
-    h.client.settle_invoice(&borrower, &id, &3u64, &1_000i128, &1u32);
+    h.client
+        .settle_invoice(&borrower, &id, &1u64, &1_000i128, &1u32);
+    h.client
+        .settle_invoice(&borrower, &id, &2u64, &1_000i128, &1u32);
+    h.client
+        .settle_invoice(&borrower, &id, &3u64, &1_000i128, &1u32);
 
     let nonces_before = h.client.get_used_nonces(&id);
     assert!(nonces_before.contains(&1u64));
     assert!(nonces_before.contains(&2u64));
     assert!(nonces_before.contains(&3u64));
 
-    let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
 
     let nonces_after = h.client.get_used_nonces(&id);
     assert!(nonces_after.contains(&1u64), "nonce 1 must survive upgrade");
@@ -235,9 +256,12 @@ fn upgrade_preserves_financing_pool_address() {
     let pool_addr = Address::generate(&h.env);
     h.client.set_financing_pool_address(&h.admin, &pool_addr);
 
-    assert_eq!(h.client.get_financing_pool_address(), Some(pool_addr.clone()));
+    assert_eq!(
+        h.client.get_financing_pool_address(),
+        Some(pool_addr.clone())
+    );
 
-    let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
 
     assert_eq!(
         h.client.get_financing_pool_address(),
@@ -253,8 +277,11 @@ fn upgrade_preserves_admin_and_paused_state() {
     h.client.pause(&h.admin);
     assert!(h.client.is_paused());
 
-    let v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
 
-    assert!(h.client.is_signer(&h.admin), "admin signer must survive upgrade");
+    assert!(
+        h.client.is_signer(&h.admin),
+        "admin signer must survive upgrade"
+    );
     assert!(h.client.is_paused(), "paused state must survive upgrade");
 }

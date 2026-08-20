@@ -1,11 +1,13 @@
 //! Reentrancy attack tests for financing pool contract
-//! 
+//!
 //! These tests simulate malicious token contracts attempting to re-enter
 //! the financing pool during deposit/withdraw operations.
 
-use super::{FinancingPoolContract, DataKey, Error, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
-use crate::types::{TokenContract, ReentrancyGuard, StorageKey};
-use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+use super::{
+    Error, FinancingPoolContract, FinancingPoolContractClient, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
+};
+use crate::types::{ReentrancyGuard, StorageKey, TokenContract};
+use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env, Vec};
 
 const DISCOUNT_BPS: u32 = 1000u32;
 
@@ -19,7 +21,12 @@ fn signers_of(env: &Env, addrs: &[Address]) -> Vec<Address> {
 
 fn init(env: &Env, client: &FinancingPoolContractClient<'_>, admin: &Address) {
     let signers = signers_of(env, &[admin.clone()]);
-    client.initialize(&signers, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS, &DISCOUNT_BPS);
+    client.initialize(
+        &signers,
+        &1u32,
+        &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
+        &DISCOUNT_BPS,
+    );
 }
 
 /// Mock malicious token contract that attempts reentrancy
@@ -29,10 +36,10 @@ pub struct MaliciousTokenContract;
 #[contractimpl]
 impl MaliciousTokenContract {
     /// Simulates a malicious callback that tries to re-enter the pool
-    pub fn malicious_transfer_callback(env: Env, pool_address: Address, from: Address) {
-        // Attempt to call deposit again (reentrancy attempt)
-        // This should fail due to the reentrancy guard
-        FinancingPoolContract::deposit(env, from, 1000i128);
+    pub fn malicious_transfer_callback(env: Env, _pool_address: Address, from: Address) {
+        // Attempt to call deposit again (reentrancy attempt).
+        // This should fail due to the reentrancy guard.
+        let _ = FinancingPoolContract::deposit(env, from, 1000i128);
     }
 }
 
@@ -42,23 +49,26 @@ fn test_reentrancy_guard_blocks_deposit_reentry() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     let lp = Address::generate(&env);
-    
+
     // First deposit should succeed
     client.deposit(&lp, &1_000i128);
-    
-    // Verify reentrancy guard is unlocked after successful call
-    let guard: ReentrancyGuard = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard())
-        .unwrap_or(ReentrancyGuard::Unlocked);
+
+    // Verify reentrancy guard is unlocked after successful call. Direct
+    // storage reads must run inside `env.as_contract` — the storage API is
+    // only accessible from within the target contract's execution context.
+    let guard: ReentrancyGuard = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard(&env))
+            .unwrap_or(ReentrancyGuard::Unlocked)
+    });
     assert_eq!(guard, ReentrancyGuard::Unlocked);
-    
+
     // Verify balance was updated
     assert_eq!(client.balance_of(&lp), 1_000);
 }
@@ -69,24 +79,25 @@ fn test_reentrancy_guard_blocks_withdraw_reentry() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     let lp = Address::generate(&env);
     client.deposit(&lp, &1_000i128);
-    
+
     // Withdraw should succeed
     client.withdraw(&lp, &500i128);
-    
+
     // Verify reentrancy guard is unlocked after successful call
-    let guard: ReentrancyGuard = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard())
-        .unwrap_or(ReentrancyGuard::Unlocked);
+    let guard: ReentrancyGuard = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard(&env))
+            .unwrap_or(ReentrancyGuard::Unlocked)
+    });
     assert_eq!(guard, ReentrancyGuard::Unlocked);
-    
+
     // Verify balance was updated
     assert_eq!(client.balance_of(&lp), 500);
 }
@@ -97,17 +108,20 @@ fn test_reentrancy_guard_blocks_when_locked_deposit() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     // Manually lock the reentrancy guard to simulate mid-execution state
-    env.storage()
-        .instance()
-        .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
-    
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(
+            &StorageKey::reentrancy_guard(&env),
+            &ReentrancyGuard::Locked,
+        );
+    });
+
     let lp = Address::generate(&env);
-    
+
     // This deposit should fail due to reentrancy guard being locked
     assert_eq!(
         client.try_deposit(&lp, &1_000i128),
@@ -121,18 +135,21 @@ fn test_reentrancy_guard_blocks_when_locked_withdraw() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     let lp = Address::generate(&env);
     client.deposit(&lp, &1_000i128);
-    
+
     // Manually lock the reentrancy guard to simulate mid-execution state
-    env.storage()
-        .instance()
-        .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
-    
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(
+            &StorageKey::reentrancy_guard(&env),
+            &ReentrancyGuard::Locked,
+        );
+    });
+
     // This withdraw should fail due to reentrancy guard being locked
     assert_eq!(
         client.try_withdraw(&lp, &500i128),
@@ -146,24 +163,26 @@ fn test_reentrancy_guard_initialized_on_init() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
-    
+
     // Before init, guard should not exist
-    let guard_before: Option<ReentrancyGuard> = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard());
+    let guard_before: Option<ReentrancyGuard> = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard(&env))
+    });
     assert_eq!(guard_before, None);
-    
+
     init(&env, &client, &admin);
-    
+
     // After init, guard should be Unlocked
-    let guard_after: ReentrancyGuard = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard())
-        .unwrap();
+    let guard_after: ReentrancyGuard = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard(&env))
+            .unwrap()
+    });
     assert_eq!(guard_after, ReentrancyGuard::Unlocked);
 }
 
@@ -173,25 +192,25 @@ fn test_state_updated_before_token_transfer_simulation() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     // Set XLM token address to trigger cross-contract call path
     let token_address = Address::generate(&env);
     client.set_token_address(&admin, &TokenContract::XLM, &token_address);
-    
+
     let lp = Address::generate(&env);
-    
+
     // Get initial state
     let balance_before = client.balance_of(&lp);
     let available_before = client.available_liquidity();
     assert_eq!(balance_before, 0);
     assert_eq!(available_before, 0);
-    
+
     // Deposit should update state before token transfer
     client.deposit(&lp, &1_000i128);
-    
+
     // Verify state was updated (even though token transfer is simulated via event)
     let balance_after = client.balance_of(&lp);
     let available_after = client.available_liquidity();
@@ -205,23 +224,32 @@ fn test_token_address_configuration() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     let xlm_address = Address::generate(&env);
     let usdc_address = Address::generate(&env);
     let aqua_address = Address::generate(&env);
-    
+
     // Admin can set token addresses
     client.set_token_address(&admin, &TokenContract::XLM, &xlm_address);
     client.set_token_address(&admin, &TokenContract::USDC, &usdc_address);
     client.set_token_address(&admin, &TokenContract::AQUA, &aqua_address);
-    
+
     // Verify addresses are stored correctly
-    assert_eq!(client.get_token_address(TokenContract::XLM), Some(xlm_address));
-    assert_eq!(client.get_token_address(TokenContract::USDC), Some(usdc_address));
-    assert_eq!(client.get_token_address(TokenContract::AQUA), Some(aqua_address));
+    assert_eq!(
+        client.get_token_address(&TokenContract::XLM),
+        Some(xlm_address)
+    );
+    assert_eq!(
+        client.get_token_address(&TokenContract::USDC),
+        Some(usdc_address)
+    );
+    assert_eq!(
+        client.get_token_address(&TokenContract::AQUA),
+        Some(aqua_address)
+    );
 }
 
 #[test]
@@ -230,26 +258,26 @@ fn test_withdraw_state_updated_before_token_transfer() {
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     init(&env, &client, &admin);
-    
+
     // Set XLM token address to trigger cross-contract call path
     let token_address = Address::generate(&env);
     client.set_token_address(&admin, &TokenContract::XLM, &token_address);
-    
+
     let lp = Address::generate(&env);
     client.deposit(&lp, &1_000i128);
-    
+
     // Get initial state
     let balance_before = client.balance_of(&lp);
     let available_before = client.available_liquidity();
     assert_eq!(balance_before, 1_000);
     assert_eq!(available_before, 1_000);
-    
+
     // Withdraw should update state before token transfer
     client.withdraw(&lp, &500i128);
-    
+
     // Verify state was updated (even though token transfer is simulated via event)
     let balance_after = client.balance_of(&lp);
     let available_after = client.available_liquidity();

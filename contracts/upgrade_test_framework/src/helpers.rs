@@ -1,6 +1,6 @@
 //! Shared test helpers used by all upgrade regression tests.
 
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{testutils::Ledger, Address, Env, Vec};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Address / signer helpers
@@ -51,10 +51,7 @@ pub fn assert_invoice_fields(
         actual_id, id,
         "invoice id mismatch after upgrade: expected {id}, got {actual_id}"
     );
-    assert_eq!(
-        actual_owner, owner,
-        "invoice owner mismatch after upgrade"
-    );
+    assert_eq!(actual_owner, owner, "invoice owner mismatch after upgrade");
     assert_eq!(
         actual_amount, amount,
         "invoice amount mismatch after upgrade: expected {amount}, got {actual_amount}"
@@ -80,8 +77,20 @@ pub fn assert_funding_fields(
     actual_advance: i128,
     actual_recipient: &Address,
 ) {
-    assert_eq!(actual_invoice_id, invoice_id, "funding.invoice_id mismatch after upgrade");
-    assert_eq!(actual_face_value, face_value, "funding.face_value mismatch after upgrade");
-    assert_eq!(actual_advance, advance, "funding.advance mismatch after upgrade");
-    assert_eq!(actual_recipient, recipient, "funding.recipient mismatch after upgrade");
+    assert_eq!(
+        actual_invoice_id, invoice_id,
+        "funding.invoice_id mismatch after upgrade"
+    );
+    assert_eq!(
+        actual_face_value, face_value,
+        "funding.face_value mismatch after upgrade"
+    );
+    assert_eq!(
+        actual_advance, advance,
+        "funding.advance mismatch after upgrade"
+    );
+    assert_eq!(
+        actual_recipient, recipient,
+        "funding.recipient mismatch after upgrade"
+    );
 }
