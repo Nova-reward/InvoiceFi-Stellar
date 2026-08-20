@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
+import { YieldGateService } from '../oracle/yield-gate.service';
 import { SettlementResult, SettlementService } from './settlement.service';
 import { SettlementSyncService } from './settlement-sync.service';
 import { SorobanEventsService } from './soroban-events.service';
@@ -23,6 +24,7 @@ interface Mocks {
   events: jest.Mocked<Pick<SorobanEventsService, 'fetchEvents' | 'getLatestLedger'>>;
   settlement: jest.Mocked<Pick<SettlementService, 'settleInvoice'>>;
   cursor: jest.Mocked<Pick<SyncCursorService, 'getLastLedger' | 'setLastLedger'>>;
+  yieldGate: jest.Mocked<Pick<YieldGateService, 'isSettlementAllowed'>>;
 }
 
 function build(): { service: SettlementSyncService } & Mocks {
@@ -35,6 +37,10 @@ function build(): { service: SettlementSyncService } & Mocks {
     getLastLedger: jest.fn(),
     setLastLedger: jest.fn().mockResolvedValue(undefined),
   };
+  // Defaults to "always allowed" — the gate is opt-in, so every existing
+  // test (written before the gate existed) should behave exactly as if it
+  // weren't there at all.
+  const yieldGate = { isSettlementAllowed: jest.fn().mockResolvedValue(true) };
   const config = {
     get: (key: string) =>
       ({
@@ -49,9 +55,10 @@ function build(): { service: SettlementSyncService } & Mocks {
     settlement as unknown as SettlementService,
     cursor as unknown as SyncCursorService,
     {} as SchedulerRegistry,
+    yieldGate as unknown as YieldGateService,
     config,
   );
-  return { service, events, settlement, cursor };
+  return { service, events, settlement, cursor, yieldGate };
 }
 
 describe('SettlementSyncService.syncOnce', () => {
@@ -135,5 +142,40 @@ describe('SettlementSyncService.syncOnce', () => {
     expect(summary).toEqual({ processed: 1, settled: 0 });
     // Cursor held at startLedger-1 so the event is re-fetched next cycle.
     expect(cursor.setLastLedger).toHaveBeenCalledWith(100);
+  });
+
+  it('defers settlement when the yield gate blocks the invoice, without failing', async () => {
+    const { service, events, settlement, cursor, yieldGate } = build();
+    cursor.getLastLedger.mockResolvedValue(100);
+    events.fetchEvents.mockResolvedValue({
+      events: [settlementEvent('7', 105)],
+      latestLedger: 110,
+    });
+    yieldGate.isSettlementAllowed.mockResolvedValue(false);
+
+    const summary = await service.syncOnce();
+
+    expect(yieldGate.isSettlementAllowed).toHaveBeenCalledWith('7');
+    expect(settlement.settleInvoice).not.toHaveBeenCalled();
+    expect(summary).toEqual({ processed: 1, settled: 0 });
+    // Held at startLedger-1, like the retry-exhausted case, so this event
+    // is re-checked (not skipped) next cycle.
+    expect(cursor.setLastLedger).toHaveBeenCalledWith(100);
+  });
+
+  it('settles normally once the yield gate allows the invoice', async () => {
+    const { service, events, settlement, cursor, yieldGate } = build();
+    cursor.getLastLedger.mockResolvedValue(100);
+    events.fetchEvents.mockResolvedValue({
+      events: [settlementEvent('7', 105)],
+      latestLedger: 105,
+    });
+    yieldGate.isSettlementAllowed.mockResolvedValue(true);
+    settlement.settleInvoice.mockResolvedValue(SettlementResult.SETTLED);
+
+    const summary = await service.syncOnce();
+
+    expect(summary).toEqual({ processed: 1, settled: 1 });
+    expect(cursor.setLastLedger).toHaveBeenCalledWith(105);
   });
 });
