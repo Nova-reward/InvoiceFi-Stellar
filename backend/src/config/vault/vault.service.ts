@@ -140,7 +140,7 @@ export class VaultService implements OnApplicationBootstrap {
     return { database, auth, smtp, stellar };
   }
 
-  private async readSecret<T extends Record<string, string>>(
+  private async readSecret<T extends object>(
     path: string,
   ): Promise<T> {
     const response = await this.vaultRequest<VaultKvResponse<T>>(

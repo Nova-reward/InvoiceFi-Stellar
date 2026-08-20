@@ -77,6 +77,18 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     return this.client.syncCursor;
   }
 
+  get webhookSubscription() {
+    return this.client.webhookSubscription;
+  }
+
+  get webhookDelivery() {
+    return this.client.webhookDelivery;
+  }
+
+  get webhookDeliveryAttempt() {
+    return this.client.webhookDeliveryAttempt;
+  }
+
   // Extend with additional model getters as the Prisma schema grows.
   // e.g.:  get user() { return this.client.user; }
 

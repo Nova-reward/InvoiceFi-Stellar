@@ -7,7 +7,34 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { ExportRequest } from './http';
 import { verifyHs256Jwt } from './jwt';
-import { principalFromPayload } from './principal';
+import { Principal, principalFromPayload } from './principal';
+
+/**
+ * Verify the caller's HS256 token (from the `Authorization: Bearer` header or
+ * the `token` cookie set at wallet connect) and return the resulting
+ * `Principal`. Shared by every guard in the backend that authenticates
+ * against the tokens issued at wallet connect — see also
+ * `WebhookAccessGuard` — so they stay byte-for-byte consistent about where a
+ * token may come from and how it is verified.
+ */
+export function resolvePrincipal(
+  req: ExportRequest,
+  secret: string,
+): Principal {
+  const token = extractToken(req);
+  if (!token) {
+    throw new UnauthorizedException('Missing authentication token');
+  }
+
+  try {
+    const payload = verifyHs256Jwt(token, secret);
+    return principalFromPayload(payload);
+  } catch (err) {
+    throw new UnauthorizedException(
+      err instanceof Error ? err.message : 'Invalid token',
+    );
+  }
+}
 
 /**
  * Authenticates compliance requests and attaches the verified `Principal` to
@@ -22,21 +49,9 @@ export class ComplianceAccessGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const req = context.switchToHttp().getRequest<ExportRequest>();
-    const token = extractToken(req);
-    if (!token) {
-      throw new UnauthorizedException('Missing authentication token');
-    }
-
     const secret = this.config.get<string>('JWT_SECRET') ?? 'dev_secret';
-    try {
-      const payload = verifyHs256Jwt(token, secret);
-      req.principal = principalFromPayload(payload);
-      return true;
-    } catch (err) {
-      throw new UnauthorizedException(
-        err instanceof Error ? err.message : 'Invalid token',
-      );
-    }
+    req.principal = resolvePrincipal(req, secret);
+    return true;
   }
 }
 
