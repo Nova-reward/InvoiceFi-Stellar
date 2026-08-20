@@ -610,3 +610,5 @@ mod test;
 mod reentrancy_tests;
 #[cfg(test)]
 mod upgrade_tests;
+#[cfg(test)]
+mod economic_attacks_tests;
