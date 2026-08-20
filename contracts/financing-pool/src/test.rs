@@ -25,6 +25,10 @@ fn signers_of(env: &Env, addrs: &[Address]) -> Vec<Address> {
 fn setup_with(discount_bps: u32) -> Harness {
     let env = Env::default();
     env.mock_all_auths();
+    // Baseline ledger sequence high enough that the staleness-boundary
+    // tests below can subtract `MAX_PRICE_AGE_LEDGERS` without underflowing
+    // `u32` (the sandbox otherwise starts at ledger 0).
+    env.ledger().with_mut(|li| li.sequence_number = 1_000);
     let contract_id = env.register(FinancingPoolContract, ());
     let client = FinancingPoolContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -35,6 +39,10 @@ fn setup_with(discount_bps: u32) -> Harness {
         &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
         &discount_bps,
     );
+    // Most tests fund invoices and aren't exercising oracle staleness
+    // specifically, so seed a fresh price feed by default; the dedicated
+    // staleness tests below override it explicitly.
+    client.set_price_feed(&admin, &1_000_000i128, &env.ledger().sequence());
     Harness { env, client, admin }
 }
 
@@ -219,7 +227,8 @@ fn fund_invoice_negative_face_value_fails() {
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
     assert_eq!(
-        h.client.try_fund_invoice(&h.admin, &1u64, &-100i128, &farmer),
+        h.client
+            .try_fund_invoice(&h.admin, &1u64, &-100i128, &farmer),
         Err(Ok(Error::InvalidAmount))
     );
 }
@@ -234,7 +243,8 @@ fn fund_invoice_duplicate_id_fails() {
     h.client.deposit(&lp, &10_000i128);
     h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     assert_eq!(
-        h.client.try_fund_invoice(&h.admin, &1u64, &500i128, &farmer),
+        h.client
+            .try_fund_invoice(&h.admin, &1u64, &500i128, &farmer),
         Err(Ok(Error::AlreadyFunded))
     );
     // Liquidity only reduced once.
@@ -251,7 +261,8 @@ fn fund_invoice_insufficient_liquidity_fails() {
     h.client.deposit(&lp, &500i128);
     // advance for 1000 face value is 900 > 500 available
     assert_eq!(
-        h.client.try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
+        h.client
+            .try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
         Err(Ok(Error::InsufficientLiquidity))
     );
 }
@@ -445,14 +456,28 @@ fn admin_transfer_full_flow() {
 
 #[test]
 fn fund_invoice_requires_fresh_price_feed() {
-    let h = setup();
-    let lp = Address::generate(&h.env);
-    let farmer = Address::generate(&h.env);
-    h.client.deposit(&lp, &10_000i128);
+    // Deliberately bypasses `setup()` (which seeds a default price feed for
+    // the tests below it) to exercise the "no feed configured yet" path.
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(FinancingPoolContract, ());
+    let client = FinancingPoolContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let signers = signers_of(&env, &[admin.clone()]);
+    client.initialize(
+        &signers,
+        &1u32,
+        &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
+        &DISCOUNT_BPS,
+    );
+
+    let lp = Address::generate(&env);
+    let farmer = Address::generate(&env);
+    client.deposit(&lp, &10_000i128);
 
     // No price feed set: should fail with StalePriceFeed
     assert_eq!(
-        h.client.try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
+        client.try_fund_invoice(&admin, &1u64, &1_000i128, &farmer),
         Err(Ok(Error::StalePriceFeed))
     );
 }
@@ -466,7 +491,8 @@ fn fund_invoice_accepts_fresh_price_feed() {
 
     let current_ledger = h.env.ledger().sequence();
     // Set a fresh price feed at the current ledger
-    h.client.set_price_feed(&h.admin, &1_000_000i128, &current_ledger);
+    h.client
+        .set_price_feed(&h.admin, &1_000_000i128, &current_ledger);
 
     let advance = h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     assert_eq!(advance, 900);
@@ -481,12 +507,15 @@ fn fund_invoice_rejects_stale_price_feed() {
     h.client.deposit(&lp, &10_000i128);
 
     let current_ledger = h.env.ledger().sequence();
-    // Set a stale price feed (older than MAX_PRICE_AGE_LEDGERS)
+    // Set a stale price feed (older than MAX_PRICE_AGE_LEDGERS). `setup()`
+    // seeds a baseline sequence number comfortably above this offset.
     let stale_timestamp = current_ledger - (MAX_PRICE_AGE_LEDGERS + 1);
-    h.client.set_price_feed(&h.admin, &1_000_000i128, &stale_timestamp);
+    h.client
+        .set_price_feed(&h.admin, &1_000_000i128, &stale_timestamp);
 
     assert_eq!(
-        h.client.try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
+        h.client
+            .try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
         Err(Ok(Error::StalePriceFeed))
     );
 }
@@ -501,7 +530,8 @@ fn fund_invoice_accepts_price_feed_at_exactly_max_age() {
     let current_ledger = h.env.ledger().sequence();
     // Set a price feed exactly at the max age boundary (should be accepted)
     let boundary_timestamp = current_ledger - MAX_PRICE_AGE_LEDGERS;
-    h.client.set_price_feed(&h.admin, &1_000_000i128, &boundary_timestamp);
+    h.client
+        .set_price_feed(&h.admin, &1_000_000i128, &boundary_timestamp);
 
     let advance = h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
     assert_eq!(advance, 900);

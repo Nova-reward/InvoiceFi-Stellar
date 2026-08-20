@@ -11,10 +11,11 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
-use access_control::{
-    AcError, AccessControl, MultisigConfig, PendingAdminTransfer, Role,
-    MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS,
-};
+use access_control::{AcError, AccessControl, MultisigConfig, PendingAdminTransfer, Role};
+// Re-exported at crate scope for the `test` submodule (via `super::*`),
+// which is the only consumer — unused in the library build itself.
+#[cfg(test)]
+use access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS;
 
 /// Lifecycle states for an invoice.
 ///
@@ -518,12 +519,22 @@ impl InvoiceContract {
     /// Grant `role` to `grantee`. Requires an admin signer. `Role::Admin`
     /// cannot be granted this way — admin authority is defined solely by the
     /// signer set (see [`propose_admin_transfer`]).
-    pub fn grant_role(env: Env, caller: Address, role: Role, grantee: Address) -> Result<(), Error> {
+    pub fn grant_role(
+        env: Env,
+        caller: Address,
+        role: Role,
+        grantee: Address,
+    ) -> Result<(), Error> {
         Ok(AccessControl::grant_role(&env, &caller, role, grantee)?)
     }
 
     /// Revoke `role` from `grantee`. Requires an admin signer.
-    pub fn revoke_role(env: Env, caller: Address, role: Role, grantee: Address) -> Result<(), Error> {
+    pub fn revoke_role(
+        env: Env,
+        caller: Address,
+        role: Role,
+        grantee: Address,
+    ) -> Result<(), Error> {
         Ok(AccessControl::revoke_role(&env, &caller, role, grantee)?)
     }
 

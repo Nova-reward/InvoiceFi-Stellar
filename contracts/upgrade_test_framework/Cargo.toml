@@ -13,7 +13,7 @@ doctest = false
 soroban-sdk = { workspace = true, features = ["testutils"] }
 invoice-contract  = { path = "../invoice" }
 financing-pool-contract = { path = "../financing-pool" }
-settlement-contract = { path = "../settlement" }
+settlement-contract = { path = "../settlement", package = "settlement" }
 access-control = { path = "../access-control" }
 
 [dev-dependencies]

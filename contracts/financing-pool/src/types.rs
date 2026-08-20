@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env, Symbol};
+use soroban_sdk::{contracttype, Env, Symbol};
 
 /// Token contract addresses for supported assets
 #[contracttype]
@@ -10,11 +10,19 @@ pub enum TokenContract {
 }
 
 impl TokenContract {
-    pub fn to_symbol(&self) -> Symbol {
+    /// Bug fix: this previously built the `Symbol` from a throwaway
+    /// `Env::default()` rather than the live contract `env`. For any string
+    /// over 9 characters, Soroban's small-symbol inline encoding doesn't
+    /// apply and a real host object is allocated — one that belonged to the
+    /// disposable `Env::default()` and was invalid (or already dropped) by
+    /// the time it reached the caller's real environment, surfacing at
+    /// runtime as a "mis-tagged object reference" host error. Every one of
+    /// these constructors now takes the caller's `&Env` instead.
+    pub fn to_symbol(&self, env: &Env) -> Symbol {
         match self {
-            TokenContract::XLM => Symbol::new(&Env::default(), "XLM"),
-            TokenContract::USDC => Symbol::new(&Env::default(), "USDC"),
-            TokenContract::AQUA => Symbol::new(&Env::default(), "AQUA"),
+            TokenContract::XLM => Symbol::new(env, "XLM"),
+            TokenContract::USDC => Symbol::new(env, "USDC"),
+            TokenContract::AQUA => Symbol::new(env, "AQUA"),
         }
     }
 }
@@ -27,48 +35,7 @@ pub enum ReentrancyGuard {
     Locked,
 }
 
-#[derive(Clone, Debug)]
-pub struct PoolBalance {
-    pub total: i128,
-    pub available: i128,
-    pub allocated: i128,
-}
-
-#[derive(Clone, Debug)]
-pub struct DepositData {
-    pub dep_key: Symbol,
-    pub depositor: Address,
-    pub amount: i128,
-    pub deposit_type: DepositType,
-    pub memo: Symbol,
-    pub InvestNow: bool,
-    pub status: DepositStatus,
-}
-
-#[derive(Clone, Debug)]
-pub struct CertificateData {
-    pub cert_key: Symbol,
-    pub linked_dep_key: Symbol,
-    pub amount: i128,
-    pub cert_type: DepositType,
-    pub payable_amount: i128,
-    pub payment_due_date: u64,
-    pub pool_invest_nonce: u64,
-    pub interest_rate: u32,
-    pub approval_status: u32,
-    pub status: DepositStatus,
-}
-
-#[derive(Clone, Debug)]
-pub struct InvestmentRequestData {
-    pub inv_key: Symbol,
-    pub investor: Address,
-    pub invoice_id: Symbol,
-    pub amount: i128,
-    pub status: InvestmentStatus,
-}
-
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[contracttype]
 pub struct StorageKey {
     pub category: Symbol,
@@ -76,50 +43,25 @@ pub struct StorageKey {
 }
 
 impl StorageKey {
-    pub fn new(category: &str, id: &str) -> Self {
+    pub fn new(env: &Env, category: &str, id: &str) -> Self {
         StorageKey {
-            category: Symbol::new(&Env::default(), category),
-            id: Symbol::new(&Env::default(), id),
+            category: Symbol::new(env, category),
+            id: Symbol::new(env, id),
         }
     }
 
-    pub fn instance(key: &str) -> Self {
-        Self::new("INSTANCE", key)
+    pub fn instance(env: &Env, key: &str) -> Self {
+        Self::new(env, "INSTANCE", key)
     }
 
-    pub fn deposit_status(dep: &Symbol) -> Self {
-        Self::new("DEP_STATUS", dep.as_str())
+    pub fn token_address(env: &Env, token: &TokenContract) -> Self {
+        StorageKey {
+            category: Symbol::new(env, "TOKEN_ADDRESS"),
+            id: token.to_symbol(env),
+        }
     }
 
-    pub fn deposit_balance(dep: &Symbol) -> Self {
-        Self::new("DEP_BALANCE", dep.as_str())
-    }
-
-    pub fn cert_status(cert: &Symbol) -> Self {
-        Self::new("CERT_STATUS", cert.as_str())
-    }
-
-    pub fn investment_status(inv: &Symbol) -> Self {
-        Self::new("INV_STATUS", inv.as_str())
-    }
-
-    pub fn investment_amount(inv: &Symbol) -> Self {
-        Self::new("INV_AMOUNT", inv.as_str())
-    }
-
-    pub fn investor_status(addr: &Address) -> Self {
-        Self::new("INVESTOR_STATUS", &addr.to_string())
-    }
-
-    pub fn fund_req_status(req: &Symbol) -> Self {
-        Self::new("FUND_REQ_STATUS", req.as_str())
-    }
-
-    pub fn token_address(token: &TokenContract) -> Self {
-        Self::new("TOKEN_ADDRESS", token.to_symbol().as_str())
-    }
-
-    pub fn reentrancy_guard() -> Self {
-        Self::instance("REENTRANCY_GUARD")
+    pub fn reentrancy_guard(env: &Env) -> Self {
+        Self::instance(env, "REENTRANCY_GUARD")
     }
 }
