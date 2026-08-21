@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InvoiceStatus } from '@prisma/client';
+import { InvoiceStatus, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WebhookDispatchService } from '../webhooks/webhook-dispatch.service';
 import { appendInvoiceEvent } from '../invoices/invoice-event.service';
@@ -27,6 +27,12 @@ export class UnexpectedInvoiceStatusError extends Error {
   }
 }
 
+/**
+ * Prisma transaction-client shape required by the settlement write.
+ * Structural rather than nominal so callers can supply any compatible tx.
+ */
+export type SettlementTxClient = Pick<PrismaClient, 'invoice'>;
+
 @Injectable()
 export class SettlementService {
   private readonly logger = new Logger(SettlementService.name);
@@ -38,7 +44,7 @@ export class SettlementService {
 
   /**
    * Apply an on-chain settlement to the database, transitioning the invoice
-   * from FUNDED to REPAID atomically.
+   * from FUNDED to REPAID atomically inside its own transaction.
    *
    * The write is a single conditional `updateMany` guarded on `status = FUNDED`,
    * so concurrent calls cannot double-apply. The operation is idempotent: a
@@ -54,6 +60,26 @@ export class SettlementService {
     invoiceId: string,
     ledger: number,
     txHash?: string,
+  ): Promise<SettlementResult> {
+    return this.prisma.$transaction(async (tx) =>
+      this.settleInvoiceWithTx(invoiceId, ledger, tx as SettlementTxClient),
+    );
+  }
+
+  /**
+   * Same as {@link settleInvoice} but runs inside a caller-supplied Prisma
+   * transaction client (`tx`). Use this when the settlement write must be
+   * atomic with other operations in the same transaction (e.g. advancing the
+   * sync cursor).
+   *
+   * @param invoiceId - On-chain invoice id.
+   * @param ledger    - Ledger sequence in which the settlement was observed.
+   * @param tx        - Active Prisma transaction client from `$transaction(cb)`.
+   */
+  async settleInvoiceWithTx(
+    invoiceId: string,
+    ledger: number,
+    tx: SettlementTxClient,
   ): Promise<SettlementResult> {
     const onchainId = BigInt(invoiceId);
 
