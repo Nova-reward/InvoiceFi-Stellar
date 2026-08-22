@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "access-control"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -658,6 +665,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 name = "financing-pool-contract"
 version = "0.1.0"
 dependencies = [
+ "access-control",
  "soroban-sdk",
 ]
 
@@ -865,6 +873,7 @@ checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 name = "invoice-contract"
 version = "0.1.0"
 dependencies = [
+ "access-control",
  "soroban-sdk",
 ]
 
@@ -1000,6 +1009,13 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oracle"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
 
 [[package]]
 name = "p256"
@@ -1296,6 +1312,7 @@ dependencies = [
 name = "settlement"
 version = "0.1.0"
 dependencies = [
+ "access-control",
  "soroban-sdk",
 ]
 
@@ -1708,6 +1725,17 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "upgrade-test-framework"
+version = "0.1.0"
+dependencies = [
+ "access-control",
+ "financing-pool-contract",
+ "invoice-contract",
+ "settlement",
+ "soroban-sdk",
+]
 
 [[package]]
 name = "version_check"

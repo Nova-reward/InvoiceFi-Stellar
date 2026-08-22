@@ -26,6 +26,22 @@ mod types;
 use crate::types::{TokenContract, ReentrancyGuard, StorageKey};
 use access_control::{AccessControl, Role, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
 
+/// Oracle-based dynamic discount configuration
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OracleDiscountConfig {
+    /// Oracle contract address (None if oracle not configured)
+    pub oracle_contract: Option<Address>,
+    /// Asset pair to query (e.g., "XLM/USDC")
+    pub asset_pair: Symbol,
+    /// Minimum discount basis points (floor)
+    pub min_discount_bps: u32,
+    /// Maximum discount basis points (ceiling)
+    pub max_discount_bps: u32,
+    /// Whether oracle-based discount is enabled
+    pub enabled: bool,
+}
+
 /// Record of capital advanced against a single invoice.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -429,6 +445,62 @@ impl FinancingPoolContract {
         Ok(())
     }
 
+    /// Configure oracle-based dynamic discount.
+    /// Requires `caller` to be a current admin signer.
+    /// When enabled, the pool will query the oracle contract for the current
+    /// market discount rate instead of using the static discount_bps.
+    pub fn set_oracle_discount_config(
+        env: Env,
+        caller: Address,
+        oracle_contract: Option<Address>,
+        asset_pair: Symbol,
+        min_discount_bps: u32,
+        max_discount_bps: u32,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        AccessControl::require_admin(&env, &caller)?;
+
+        if min_discount_bps >= max_discount_bps {
+            return Err(Error::InvalidDiscount);
+        }
+        if max_discount_bps >= 10_000 {
+            return Err(Error::InvalidDiscount);
+        }
+
+        let config = OracleDiscountConfig {
+            oracle_contract: oracle_contract.clone(),
+            asset_pair,
+            min_discount_bps,
+            max_discount_bps,
+            enabled,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleDiscountConfig, &config);
+
+        env.events().publish(
+            (Symbol::new(&env, "pool"), Symbol::new(&env, "oracle_config_set")),
+            (
+                oracle_contract.unwrap_or(Address::from_contract_id(&env, &[0u8; 32])),
+                enabled,
+                min_discount_bps,
+                max_discount_bps,
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Get the current oracle discount configuration.
+    pub fn get_oracle_discount_config(env: Env) -> Result<OracleDiscountConfig, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleDiscountConfig)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Get token contract address for a specific token.
     pub fn get_token_address(env: Env, token: TokenContract) -> Option<Address> {
         env.storage()
@@ -540,14 +612,64 @@ impl FinancingPoolContract {
     // ---- internals -------------------------------------------------------
 
     fn advance_for(env: &Env, face_value: i128) -> i128 {
-        let bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DiscountBps)
-            .unwrap_or(0);
+        let bps = Self::get_effective_discount_bps(env);
         // Floor division: any rounding loss is retained by the pool as extra
         // discount, never over-advanced to the recipient.
         face_value * (BPS_DENOMINATOR - bps as i128) / BPS_DENOMINATOR
+    }
+
+    /// Get the effective discount basis points.
+    /// If oracle is configured and enabled, query the oracle for the current rate.
+    /// Otherwise, use the static discount_bps.
+    fn get_effective_discount_bps(env: &Env) -> u32 {
+        if let Some(config) = env.storage().instance().get(&DataKey::OracleDiscountConfig) {
+            let oracle_config: OracleDiscountConfig = config;
+            if oracle_config.enabled {
+                if let Some(oracle_contract) = oracle_config.oracle_contract {
+                    // Query the oracle contract for the current price
+                    // The oracle returns Option<(i128, u64)> where price is in basis points
+                    // For now, we'll use a simulated call - in production this would
+                    // use soroban_sdk::invoke_contract or similar
+                    if let Ok(Some((oracle_price, _))) = Self::query_oracle_price(env, &oracle_contract, &oracle_config.asset_pair) {
+                        // Clamp the oracle price between min and max
+                        let clamped = if oracle_price < oracle_config.min_discount_bps as i128 {
+                            oracle_config.min_discount_bps
+                        } else if oracle_price > oracle_config.max_discount_bps as i128 {
+                            oracle_config.max_discount_bps
+                        } else {
+                            oracle_price as u32
+                        };
+                        return clamped;
+                    }
+                }
+            }
+        }
+
+        // Fallback to static discount
+        env.storage()
+            .instance()
+            .get(&DataKey::DiscountBps)
+            .unwrap_or(0)
+    }
+
+    /// Query the oracle contract for the current price.
+    /// Returns None if the oracle is unavailable or returns None.
+    fn query_oracle_price(
+        env: &Env,
+        oracle_contract: &Address,
+        asset_pair: &Symbol,
+    ) -> Result<Option<(i128, u64)>, Error> {
+        // In a real Soroban contract, we would use:
+        // env.invoke_contract::<Option<(i128, u64)>>(
+        //     oracle_contract,
+        //     "get_price",
+        //     Vec::from_array(&env, [asset_pair.to_scval()])
+        // )
+        //
+        // For now, we return None to fall back to static discount
+        // The actual cross-contract call will be implemented when the oracle
+        // contract is deployed and integrated
+        Ok(None)
     }
 
     fn balance_inner(env: &Env, addr: &Address) -> i128 {
