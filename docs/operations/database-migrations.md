@@ -355,6 +355,55 @@ After applying any migration:
    - Check performance metrics
    - Verify application functionality
 
+## How to Verify Zero-Downtime Migrations
+
+For any expand/contract migration series, you can prove it is zero-downtime by
+running the dedicated harness script.  The harness:
+
+1. Spins up a fresh **PostgreSQL 15** container (port 5444, auto-cleaned on exit)
+2. Applies the migrations **one at a time**, pausing after each step
+3. Asserts the schema at each phase (correct columns, indexes, row counts)
+4. Runs the full backend unit-test suite **against the intermediate schema**
+   (both old and new columns present simultaneously) to confirm neither old nor
+   new application code breaks during the transition window
+5. Asserts **data integrity** at every step – no rows lost, no values corrupted
+
+### Running locally
+
+```bash
+# Full run (includes backend unit tests)
+./scripts/test-expand-contract-harness.sh
+
+# Skip unit tests (faster iteration on schema assertions only)
+./scripts/test-expand-contract-harness.sh --skip-unit-tests
+```
+
+Requirements: Docker and Node.js ≥ 20 with npm.  No local `psql` needed.
+
+### What the harness proves for the investor → funder rename
+
+| Phase | Migrations applied | Schema state | Assertion |
+|-------|-------------------|--------------|-----------|
+| 1 | init + expand_part1 | `investor` ✓  `funder` ✓ (nullable) | Both columns readable; old code writes `investor`, new code writes `funder` |
+| 1b | (same) | intermediate | Backend unit-tests pass |
+| 2 | + expand_part2 | `investor` ✓  `funder` ✓ (backfilled) | `funder` = `investor` for all non-null rows; `Invoice_funder_idx` exists |
+| 3 | + contract | `investor` ✗  `funder` ✓ | `investor` gone; row count unchanged; `Invoice_investor_idx` dropped |
+
+### Static validation (skip-step check)
+
+`scripts/validate-expand-contract.sh` also enforces that no contract migration
+for a rename series is merged without the two required expand predecessors.  It
+will exit 1 and print a `::error::` annotation if a series skips the backfill
+step, blocking the PR in CI.
+
+### CI integration
+
+Both checks run automatically in the **Expand/Contract Zero-Downtime Harness**
+job in `.github/workflows/migration-ci.yml` on every pull request that touches
+`backend/prisma/migrations/**` or either script.
+
+
+
 ## Emergency Contacts
 
 - Database Administrator: [CONTACT]
