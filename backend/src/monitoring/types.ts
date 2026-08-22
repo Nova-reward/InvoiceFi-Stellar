@@ -3,7 +3,9 @@ export type AnomalyType =
   | 'funding_volume_spike'
   | 'funding_velocity_spike'
   | 'oracle_price_deviation'
-  | 'pauser_role_changed';
+  | 'pauser_role_changed'
+  | 'relative_volume_spike'
+  | 'unusual_discount';
 
 export interface MonitoringEvent {
   ledger: number;
@@ -19,6 +21,7 @@ export interface MonitoringEvent {
   role?: string;
   oldValue?: string;
   newValue?: string;
+  discountRate?: number;
 }
 
 export interface AnomalyAlert {
