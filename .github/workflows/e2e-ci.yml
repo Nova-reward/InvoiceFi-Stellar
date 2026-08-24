@@ -1,0 +1,137 @@
+name: E2E Tests
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "contracts/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e-ci.yml"
+      - "docker-compose.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "contracts/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e-ci.yml"
+      - "docker-compose.yml"
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: E2E Invoice Lifecycle Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Install E2E dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: tests/e2e
+        run: npx playwright install chromium --with-deps
+
+      - name: Copy env file
+        run: |
+          if [ ! -f .env ]; then
+            cp .env.example .env
+          fi
+
+      - name: Start local stack
+        run: |
+          docker compose up -d --build --remove-orphans
+        env:
+          NODE_ENV: development
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for all services to be healthy..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
+              echo "Backend is ready"
+              break
+            fi
+            echo "Waiting... ($i/60)"
+            sleep 5
+          done
+
+          for i in $(seq 1 40); do
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "Frontend is ready"
+              break
+            fi
+            echo "Waiting for frontend... ($i/40)"
+            sleep 5
+          done
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000 > /dev/null 2>&1; then
+              echo "Horizon is ready"
+              break
+            fi
+            echo "Waiting for Horizon... ($i/30)"
+            sleep 5
+          done
+
+      - name: Provision Stellar accounts
+        working-directory: tests/e2e
+        run: node scripts/provision-accounts.mjs
+        env:
+          HORIZON_URL: http://localhost:8000
+          SOROBAN_RPC_URL: http://localhost:8001
+          NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+
+      - name: Deploy Soroban contracts
+        working-directory: tests/e2e
+        run: node scripts/deploy-contracts.mjs
+        env:
+          HORIZON_URL: http://localhost:8000
+          SOROBAN_RPC_URL: http://localhost:8001
+          NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+
+      - name: Run E2E tests
+        working-directory: tests/e2e
+        run: npx playwright test --reporter=github,html
+        env:
+          BASE_URL: http://localhost:3000
+          API_URL: http://localhost:4000
+          CI: true
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: tests/e2e/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: tests/e2e/test-results/
+          retention-days: 7
+
+      - name: Upload test environment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-env
+          path: tests/e2e/.env.test
+          retention-days: 7
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down -v
