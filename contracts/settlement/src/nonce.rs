@@ -17,7 +17,7 @@ impl NonceManager {
         let mut nm = if let Some(meta) = e.storage().persistent().get(&key) {
             meta
         } else {
-            NonceMeta::new(invoice_id.clone(), due_date)
+            NonceMeta::new(e, invoice_id.clone(), due_date)
         };
         nm.mark_used(e, nonce);
         e.storage().persistent().set(&key, &nm);
