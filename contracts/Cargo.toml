@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "access-control",
+    "invoice",
+    "financing-pool",
+    "settlement",
+    "integration-tests",
+]
+
+[workspace.dependencies]
+soroban-sdk = "22.0.0"

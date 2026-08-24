@@ -175,6 +175,11 @@ Handles:
 - Yield verification
 - Fund distribution
 
+### Storage Key Namespacing & Collision Detection
+- All contracts use tuple namespacing `(Symbol, DataKey)` with unique `CONTRACT_PREFIX` identifiers
+- Collision detection script: `./scripts/check-storage-keys.sh` (or `make check-storage-keys`)
+- Documentation: [docs/storage-namespacing.md](docs/storage-namespacing.md)
+
 ---
 
 ## Project Structure
