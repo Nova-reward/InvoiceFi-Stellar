@@ -68,6 +68,8 @@ model Invoice {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
+  events       InvoiceEvent[]
+
   @@index([status])
   @@index([farmer])
   @@index([investor])
@@ -125,4 +127,123 @@ model SyncCursor {
   id         Int      @id @default(1)
   lastLedger Int      @default(0)
   updatedAt  DateTime @updatedAt
+}
+
+/// Lifecycle of a single queued webhook delivery attempt sequence.
+enum WebhookDeliveryStatus {
+  /// Waiting for `nextAttemptAt`, or waiting to be picked up for the first time.
+  PENDING
+  /// Claimed by a worker and currently being attempted (see `lockedAt`).
+  PROCESSING
+  /// The subscriber returned a 2xx response.
+  DELIVERED
+  /// All retries in the backoff schedule were exhausted without success.
+  ABANDONED
+}
+
+/// An HTTP endpoint a farmer or investor has registered to receive invoice
+/// lifecycle notifications (created, submitted, funded, repaid, defaulted).
+model WebhookSubscription {
+  id         String   @id @default(uuid())
+  /// Wallet address of the farmer/investor who owns this subscription.
+  ownerId    String
+  url        String
+  /// HMAC-SHA256 signing secret used to sign every delivery. Generated
+  /// server-side at registration and returned to the caller exactly once.
+  secret     String
+  /// Invoice lifecycle event types this subscription receives. `["*"]` means
+  /// all event types.
+  eventTypes String[]
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([ownerId])
+  @@index([active])
+}
+
+/// A single queued invoice-event notification for one subscription. Acts as
+/// the persistent delivery queue: a scheduled worker claims PENDING rows
+/// whose `nextAttemptAt` has passed (see WebhookDeliveryWorkerService),
+/// attempts HTTP delivery, and reschedules or abandons on failure.
+model WebhookDelivery {
+  id             String                @id @default(uuid())
+  subscription   WebhookSubscription   @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId String
+  eventType      String
+  /// Deterministic hash of the source event, unique per subscription. Lets
+  /// a re-emitted (duplicate) lifecycle event be enqueued safely without
+  /// creating a second delivery for the same subscriber.
+  idempotencyKey String
+  /// The full InvoiceEvent payload sent to the subscriber, verbatim.
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attemptCount   Int                   @default(0)
+  nextAttemptAt  DateTime              @default(now())
+  /// Set while a worker holds this row in PROCESSING; used to reclaim rows
+  /// left behind by a worker that crashed mid-delivery.
+  lockedAt       DateTime?
+  lastAttemptAt  DateTime?
+  lastStatusCode Int?
+  lastError      String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  attempts WebhookDeliveryAttempt[]
+
+  @@unique([subscriptionId, idempotencyKey])
+  @@index([status, nextAttemptAt])
+}
+
+/// Immutable log entry for one delivery attempt, queryable via the delivery
+/// log API for debugging subscriber-side failures.
+model WebhookDeliveryAttempt {
+  id            String          @id @default(uuid())
+  delivery      WebhookDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  deliveryId    String
+  attemptNumber Int
+  attemptedAt   DateTime        @default(now())
+  success       Boolean
+  statusCode    Int?
+  error         String?
+  durationMs    Int?
+
+  @@index([deliveryId])
+}
+
+/// Append-only audit log of every Invoice.status transition (issue #162).
+/// Rows are created, never updated or deleted — callers must not add an
+/// `update`/`delete` on this model anywhere in the codebase.
+model InvoiceEvent {
+  id               String         @id @default(uuid())
+  /// References Invoice.onchainId rather than the internal Int id so callers
+  /// that already hold the on-chain id (settlement sync, funding) can record
+  /// an event without an extra lookup.
+  invoiceOnchainId BigInt
+  invoice          Invoice        @relation(fields: [invoiceOnchainId], references: [onchainId])
+  /// Null only for the very first event recorded for an invoice, if ever
+  /// emitted for creation; every transition event has a previous state.
+  previousStatus   InvoiceStatus?
+  newStatus        InvoiceStatus
+  /// Wallet address or service name that triggered the transition.
+  actorId          String
+  /// Soroban transaction hash for on-chain-triggered transitions. Null for
+  /// transitions with no associated on-chain transaction.
+  txHash           String?
+  /// Nanosecond-precision epoch timestamp captured in application code.
+  /// Postgres `timestamp` only carries microsecond precision and Node has no
+  /// native OS-level nanosecond wall-clock API, so this combines Date.now()
+  /// (ms) with the sub-millisecond remainder of process.hrtime() for extra
+  /// resolution. `sequence` (below), not this column, is the authoritative
+  /// append order; occurredAtNanos is for audit display / cross-system
+  /// correlation only.
+  occurredAtNanos  BigInt
+  /// DB-assigned monotonic append order; the source of truth for "ordered by
+  /// timestamp" queries.
+  sequence         Int            @default(autoincrement())
+  createdAt        DateTime       @default(now())
+
+  @@index([invoiceOnchainId, sequence])
 }

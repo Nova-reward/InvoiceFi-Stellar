@@ -1,0 +1,184 @@
+name: Upgrade Regression Tests
+
+# Runs on every PR that touches any contract source or the test framework
+# itself.  Failures BLOCK merge (configured as a required status check in
+# the repository branch protection settings — see docs/testing/upgrade-regression.md).
+
+on:
+  pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/upgrade-regression.yml"
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "contracts/**"
+
+concurrency:
+  group: upgrade-regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Job 1: Invoice contract upgrade regression ──────────────────────────────
+  invoice-upgrade:
+    name: Invoice — Upgrade Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-upgrade-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-upgrade-
+
+      - name: Run Invoice upgrade regression tests
+        working-directory: contracts
+        run: |
+          cargo test \
+            -p invoice-contract \
+            upgrade \
+            -- --nocapture 2>&1 | tee /tmp/invoice-upgrade.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: invoice-upgrade-log
+          path: /tmp/invoice-upgrade.log
+          retention-days: 7
+
+  # ── Job 2: Financing Pool contract upgrade regression ────────────────────────
+  financing-pool-upgrade:
+    name: Financing Pool — Upgrade Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-upgrade-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-upgrade-
+
+      - name: Run Financing Pool upgrade regression tests
+        working-directory: contracts
+        run: |
+          cargo test \
+            -p financing-pool-contract \
+            upgrade \
+            -- --nocapture 2>&1 | tee /tmp/pool-upgrade.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: financing-pool-upgrade-log
+          path: /tmp/pool-upgrade.log
+          retention-days: 7
+
+  # ── Job 3: Settlement contract upgrade regression ────────────────────────────
+  settlement-upgrade:
+    name: Settlement — Upgrade Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-upgrade-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-upgrade-
+
+      - name: Run Settlement upgrade regression tests
+        working-directory: contracts
+        run: |
+          cargo test \
+            -p settlement-contract \
+            upgrade \
+            -- --nocapture 2>&1 | tee /tmp/settlement-upgrade.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: settlement-upgrade-log
+          path: /tmp/settlement-upgrade.log
+          retention-days: 7
+
+  # ── Gate job: all three must pass ───────────────────────────────────────────
+  # This is the job to register as a required status check in branch protection.
+  upgrade-regression-gate:
+    name: "✅ Upgrade Regression Gate"
+    needs:
+      - invoice-upgrade
+      - financing-pool-upgrade
+      - settlement-upgrade
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check all upgrade regression jobs passed
+        run: |
+          INVOICE="${{ needs.invoice-upgrade.result }}"
+          POOL="${{ needs.financing-pool-upgrade.result }}"
+          SETTLEMENT="${{ needs.settlement-upgrade.result }}"
+
+          echo "Invoice upgrade result:        $INVOICE"
+          echo "Financing Pool upgrade result: $POOL"
+          echo "Settlement upgrade result:     $SETTLEMENT"
+
+          if [[ "$INVOICE" != "success" || "$POOL" != "success" || "$SETTLEMENT" != "success" ]]; then
+            echo ""
+            echo "::error::One or more upgrade regression test jobs failed."
+            echo "::error::Contract changes that break upgrade state invariants cannot be merged."
+            echo "::error::See docs/testing/upgrade-regression.md for the test strategy."
+            exit 1
+          fi
+
+          echo ""
+          echo "All upgrade regression tests passed. ✅"

@@ -5,7 +5,7 @@ members = [
     "financing-pool",
     "settlement",
     "access-control",
-    "common",
+    "upgrade_test_framework",
 ]
 
 [workspace.package]

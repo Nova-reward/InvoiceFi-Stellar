@@ -440,3 +440,70 @@ fn admin_transfer_full_flow() {
     assert!(!client.is_signer(&s1));
     assert!(client.is_signer(&new_signer));
 }
+
+// ---- price feed staleness --------------------------------------------------
+
+#[test]
+fn fund_invoice_requires_fresh_price_feed() {
+    let h = setup();
+    let lp = Address::generate(&h.env);
+    let farmer = Address::generate(&h.env);
+    h.client.deposit(&lp, &10_000i128);
+
+    // No price feed set: should fail with StalePriceFeed
+    assert_eq!(
+        h.client.try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
+        Err(Ok(Error::StalePriceFeed))
+    );
+}
+
+#[test]
+fn fund_invoice_accepts_fresh_price_feed() {
+    let h = setup();
+    let lp = Address::generate(&h.env);
+    let farmer = Address::generate(&h.env);
+    h.client.deposit(&lp, &10_000i128);
+
+    let current_ledger = h.env.ledger().sequence();
+    // Set a fresh price feed at the current ledger
+    h.client.set_price_feed(&h.admin, &1_000_000i128, &current_ledger);
+
+    let advance = h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
+    assert_eq!(advance, 900);
+    assert!(h.client.is_funded(&1u64));
+}
+
+#[test]
+fn fund_invoice_rejects_stale_price_feed() {
+    let h = setup();
+    let lp = Address::generate(&h.env);
+    let farmer = Address::generate(&h.env);
+    h.client.deposit(&lp, &10_000i128);
+
+    let current_ledger = h.env.ledger().sequence();
+    // Set a stale price feed (older than MAX_PRICE_AGE_LEDGERS)
+    let stale_timestamp = current_ledger - (MAX_PRICE_AGE_LEDGERS + 1);
+    h.client.set_price_feed(&h.admin, &1_000_000i128, &stale_timestamp);
+
+    assert_eq!(
+        h.client.try_fund_invoice(&h.admin, &1u64, &1_000i128, &farmer),
+        Err(Ok(Error::StalePriceFeed))
+    );
+}
+
+#[test]
+fn fund_invoice_accepts_price_feed_at_exactly_max_age() {
+    let h = setup();
+    let lp = Address::generate(&h.env);
+    let farmer = Address::generate(&h.env);
+    h.client.deposit(&lp, &10_000i128);
+
+    let current_ledger = h.env.ledger().sequence();
+    // Set a price feed exactly at the max age boundary (should be accepted)
+    let boundary_timestamp = current_ledger - MAX_PRICE_AGE_LEDGERS;
+    h.client.set_price_feed(&h.admin, &1_000_000i128, &boundary_timestamp);
+
+    let advance = h.client.fund_invoice(&h.admin, &1u64, &1_000i128, &farmer);
+    assert_eq!(advance, 900);
+    assert!(h.client.is_funded(&1u64));
+}

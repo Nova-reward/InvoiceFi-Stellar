@@ -39,7 +39,7 @@ export interface AppSecrets {
 }
 
 /** Vault KV v2 response envelope for a single secret. */
-export interface VaultKvResponse<T extends Record<string, string>> {
+export interface VaultKvResponse<T extends object> {
   data: {
     data: T;
     metadata: {

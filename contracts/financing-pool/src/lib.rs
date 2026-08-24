@@ -15,6 +15,9 @@ use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, Symbol, Vec,
 };
 
+/// Maximum age (in ledgers) for an oracle price feed before it is considered stale.
+pub const MAX_PRICE_AGE_LEDGERS: u32 = 100;
+
 // NOTE: `error.rs` is a pre-existing, unused scaffold left over from an
 // earlier iteration of this contract (it doesn't match this API, and its own
 // `mod tests;` doesn't resolve) — intentionally not wired in via `mod error;`.
@@ -76,6 +79,8 @@ enum DataKey {
     Balance(Address),
     /// Funding record keyed by invoice id.
     Funding(u64),
+    /// Oracle price feed: (price, timestamp_ledger).
+    PriceFeed,
 }
 
 #[contracterror]
@@ -108,19 +113,8 @@ pub enum Error {
     ThresholdNotMet = 20,
     TimelockNotElapsed = 21,
     CannotGrantAdminRole = 22,
-    Overflow = 23,
-    Underflow = 24,
-    DivisionByZero = 25,
-}
-
-impl From<common::CheckedMathError> for Error {
-    fn from(e: common::CheckedMathError) -> Self {
-        match e {
-            common::CheckedMathError::Overflow => Error::Overflow,
-            common::CheckedMathError::Underflow => Error::Underflow,
-            common::CheckedMathError::DivisionByZero => Error::DivisionByZero,
-        }
-    }
+    /// Oracle price feed is stale (older than MAX_PRICE_AGE_LEDGERS).
+    StalePriceFeed = 23,
 }
 
 impl From<access_control::AcError> for Error {
@@ -155,7 +149,7 @@ pub struct FinancingPoolContract;
 impl FinancingPoolContract {
     /// One-time initialization. `signers`/`threshold` define the n-of-m admin
     /// signer set; `timelock_ledgers` gates signer-set changes (minimum
-    /// [`access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS`]).
+    /// [`access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS]`).
     ///
     /// `discount_bps` is the funding discount in basis points and must be
     /// strictly less than 10_000 (100%).
@@ -311,7 +305,8 @@ impl FinancingPoolContract {
     ///
     /// Credits `recipient` with `face_value - discount` and records the
     /// funding. Rejects zero/negative face values, invoices already funded,
-    /// and requests that exceed available liquidity. Returns the advance.
+    /// requests that exceed available liquidity, and calls where the oracle
+    /// price feed is stale. Returns the advance.
     pub fn fund_invoice(
         env: Env,
         caller: Address,
@@ -334,7 +329,10 @@ impl FinancingPoolContract {
             return Err(Error::AlreadyFunded);
         }
 
-        let advance = Self::advance_for(&env, face_value)?;
+        // Staleness guard: refuse to fund if the oracle feed is too old.
+        Self::require_fresh_price_feed(&env)?;
+
+        let advance = Self::advance_for(&env, face_value);
         let available = Self::available_inner(&env);
         if available < advance {
             return Err(Error::InsufficientLiquidity);
@@ -437,6 +435,27 @@ impl FinancingPoolContract {
         env.storage()
             .instance()
             .get(&StorageKey::token_address(&token))
+    }
+
+    /// Set the oracle price feed tuple (price, timestamp_ledger). Requires
+    /// an admin signer. Intended to be called by the backend/oracle adapter.
+    pub fn set_price_feed(
+        env: Env,
+        caller: Address,
+        price: i128,
+        timestamp: u32,
+    ) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        AccessControl::require_admin(&env, &caller)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PriceFeed, &(price, timestamp));
+        Ok(())
+    }
+
+    /// Get the current oracle price feed tuple, if any.
+    pub fn get_price_feed(env: Env) -> Option<(i128, u32)> {
+        env.storage().instance().get(&DataKey::PriceFeed)
     }
 
     // ---- access control ---------------------------------------------------
@@ -562,9 +581,35 @@ impl FinancingPoolContract {
         AccessControl::multisig(env)?;
         Ok(())
     }
+
+    /// Panics with `StalePriceFeed` if the stored oracle timestamp is older
+    /// than `MAX_PRICE_AGE_LEDGERS` relative to the current ledger sequence.
+    fn require_fresh_price_feed(env: &Env) -> Result<(), Error> {
+        let current_ledger: u32 = env.ledger().sequence();
+        let feed: Option<(i128, u32)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PriceFeed);
+        match feed {
+            Some((_price, timestamp)) => {
+                let age = current_ledger.saturating_sub(timestamp);
+                if age > MAX_PRICE_AGE_LEDGERS {
+                    return Err(Error::StalePriceFeed);
+                }
+                Ok(())
+            }
+            None => {
+                // No feed set yet: treat as stale to prevent funding until
+                // an oracle source is configured.
+                Err(Error::StalePriceFeed)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod test;
 #[cfg(test)]
 mod reentrancy_tests;
+#[cfg(test)]
+mod upgrade_tests;

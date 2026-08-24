@@ -5,8 +5,10 @@ pub mod types;
 pub use error::{SettlementError, SettlementStatus};
 pub use types::{InvoiceRecord, NonceMeta, StorageKey, ReentrancyGuard};
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 
+use crate::error::SettlementError;
+use crate::types::{AttestationRecord, NonceMeta, PriceAttestation, StorageKey, ReentrancyGuard};
 use access_control::{AcError, AccessControl, MultisigConfig, PendingAdminTransfer, Role};
 
 /// Unwrap an [`access_control`] result, translating any [`AcError`] into the
@@ -57,6 +59,12 @@ pub trait SettlementTrait {
     );
     fn set_fee_rate(e: Env, caller: Address, fee_rate: u32);
     fn set_escrow_pubkey(e: Env, caller: Address, pubkey_bytes: soroban_sdk::BytesN<32>);
+    fn submit_attestation(
+        e: Env,
+        caller: Address,
+        payload_bytes: soroban_sdk::Bytes,
+        sig_bytes: soroban_sdk::BytesN<64>,
+    );
     fn settlement_auth(
         e: Env,
         caller: Address,
@@ -570,3 +578,5 @@ impl SettlementTrait for SettlementContract {
 pub mod tests;
 #[cfg(test)]
 mod reentrancy_tests;
+#[cfg(test)]
+mod upgrade_tests;

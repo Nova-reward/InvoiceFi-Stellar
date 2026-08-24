@@ -1,10 +1,15 @@
 name: Contract CI Gate
+# NOTE: This workflow is one of TWO required status checks for contract PRs.
+# The second is "✅ Upgrade Regression Gate" from upgrade-regression.yml.
+# Both must pass before a contract-touching PR can be merged.
+# See docs/testing/upgrade-regression.md for the branch protection setup.
 
 on:
   pull_request:
     paths:
       - "contracts/**"
       - ".github/workflows/contract-ci-gate.yml"
+      - ".github/workflows/upgrade-regression.yml"
       - "scripts/check-storage-keys.sh"
       - "scripts/contract-simulate.sh"
       - "scripts/contract-resource-diff.sh"

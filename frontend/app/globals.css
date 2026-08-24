@@ -2,10 +2,49 @@
   box-sizing: border-box;
 }
 
+/* ── Design tokens ──────────────────────────────────────────────────────── */
 :root {
   font-family: Inter, system-ui, sans-serif;
   color: #111827;
   background: #f9fafb;
+
+  /* Status badge — light mode
+     Contrast ratios verified against WCAG 2.1 AA (≥ 4.5:1 for small text):
+       funded:   #5b21b6 on #ede9fe  → 7.57:1 ✓
+       repaid:   #166534 on #dcfce7  → 6.49:1 ✓
+       defaulted:#991b1b on #fee2e2  → 6.80:1 ✓  */
+  --status-funded-bg: #ede9fe;
+  --status-funded-color: #5b21b6;
+  --status-repaid-bg: #dcfce7;
+  --status-repaid-color: #166534;
+  --status-defaulted-bg: #fee2e2;
+  --status-defaulted-color: #991b1b;
+
+  /* Focus ring color — meets 3:1 against white per WCAG 2.1 SC 1.4.11 */
+  --focus-ring-color: #4f46e5;
+}
+
+/* ── Dark-mode overrides ────────────────────────────────────────────────── */
+/*
+   Dark mode contrast ratios (≥ 4.5:1):
+     funded:   #c4b5fd on #3b0764  → 8.12:1 ✓
+     repaid:   #86efac on #052e16  → 10.62:1 ✓
+     defaulted:#fca5a5 on #450a0a  → 8.51:1 ✓
+*/
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f9fafb;
+    background: #111827;
+
+    --status-funded-bg: #3b0764;
+    --status-funded-color: #c4b5fd;
+    --status-repaid-bg: #052e16;
+    --status-repaid-color: #86efac;
+    --status-defaulted-bg: #450a0a;
+    --status-defaulted-color: #fca5a5;
+
+    --focus-ring-color: #818cf8;
+  }
 }
 
 body {
@@ -130,19 +169,64 @@ td {
   font-weight: 600;
 }
 
+/* Status colors use CSS custom properties so dark-mode overrides work
+   automatically. Contrast ratios are documented in :root above. */
 .status-funded {
-  background: #ede9fe;
-  color: #5b21b6;
+  background: var(--status-funded-bg);
+  color: var(--status-funded-color);
 }
 
 .status-repaid {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--status-repaid-bg);
+  color: var(--status-repaid-color);
 }
 
 .status-defaulted {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--status-defaulted-bg);
+  color: var(--status-defaulted-color);
+}
+
+/* ── Focus styles — WCAG 2.1 SC 2.4.7 & SC 1.4.11 ──────────────────────── */
+/*
+  Visible focus indicator on all interactive elements:
+  - 2 px solid ring offset from element boundary
+  - Uses brand indigo (#4f46e5 / --focus-ring-color) which is ≥ 3:1
+    against white backgrounds.
+  - Removes browser default outline only when our ring is present.
+*/
+:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* Remove the default outline only for mouse clicks, keep it for keyboard */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Sortable table header focus ring */
+th.sortable:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+  background: #f5f3ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  th.sortable:focus-visible {
+    background: #1e1b4b;
+  }
+}
+
+/* Pagination button focus ring */
+.pagination-controls button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* Filter select focus ring */
+.filter-group select:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .pagination-controls {

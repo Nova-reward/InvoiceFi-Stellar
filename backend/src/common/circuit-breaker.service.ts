@@ -12,6 +12,7 @@ export interface CircuitBreakerConfig {
   resetTimeoutMs: number;
   successThresholdHalfOpen: number;
   timeWindowMs: number;
+  stalenessFailureThreshold: number;
 }
 
 interface CircuitBreakerInstance {
@@ -20,6 +21,7 @@ interface CircuitBreakerInstance {
   successes: number;
   lastFailureTime?: number;
   nextAttemptTime?: number;
+  consecutiveStalenessFailures: number;
 }
 
 @Injectable()
@@ -34,6 +36,7 @@ export class CircuitBreakerService {
       resetTimeoutMs: Number(this.configService.get('CIRCUIT_BREAKER_RESET_TIMEOUT_MS') || '60000'),
       successThresholdHalfOpen: Number(this.configService.get('CIRCUIT_BREAKER_SUCCESS_THRESHOLD') || '2'),
       timeWindowMs: Number(this.configService.get('CIRCUIT_BREAKER_TIME_WINDOW_MS') || '10000'),
+      stalenessFailureThreshold: Number(this.configService.get('CIRCUIT_BREAKER_STALENESS_FAILURE_THRESHOLD') || '3'),
     };
   }
 
@@ -43,6 +46,7 @@ export class CircuitBreakerService {
         state: CircuitState.CLOSED,
         failures: 0,
         successes: 0,
+        consecutiveStalenessFailures: 0,
       });
     }
     return this.circuits.get(name)!;
@@ -52,6 +56,7 @@ export class CircuitBreakerService {
     name: string,
     fn: () => Promise<T>,
     fallback?: () => Promise<T>,
+    options?: { isStalenessError?: (error: unknown) => boolean },
   ): Promise<T> {
     const circuit = this.getOrCreateCircuit(name);
 
@@ -61,6 +66,7 @@ export class CircuitBreakerService {
         circuit.state = CircuitState.HALF_OPEN;
         circuit.successes = 0;
         circuit.failures = 0;
+        circuit.consecutiveStalenessFailures = 0;
         this.logger.log(`Circuit ${name} transitioned to HALF_OPEN`);
       } else {
         if (fallback) return fallback();
@@ -77,29 +83,51 @@ export class CircuitBreakerService {
           circuit.state = CircuitState.CLOSED;
           circuit.failures = 0;
           circuit.successes = 0;
+          circuit.consecutiveStalenessFailures = 0;
           this.logger.log(`Circuit ${name} transitioned to CLOSED`);
         }
       } else if (circuit.state === CircuitState.CLOSED) {
         circuit.failures = 0;
       }
 
+      // Reset staleness counter on success
+      circuit.consecutiveStalenessFailures = 0;
+
       return result;
     } catch (error) {
       circuit.failures++;
       circuit.lastFailureTime = Date.now();
 
+      // Track consecutive staleness errors
+      const isStaleness = options?.isStalenessError?.(error) ?? false;
+      if (isStaleness) {
+        circuit.consecutiveStalenessFailures++;
+        this.logger.warn(
+          `Circuit ${name} detected staleness error (${circuit.consecutiveStalenessFailures}/${this.config.stalenessFailureThreshold})`,
+        );
+      } else {
+        circuit.consecutiveStalenessFailures = 0;
+      }
+
       if (circuit.state === CircuitState.HALF_OPEN) {
         circuit.state = CircuitState.OPEN;
         circuit.nextAttemptTime = Date.now() + this.config.resetTimeoutMs;
         this.logger.warn(`Circuit ${name} transitioned to OPEN (half-open failure)`);
-      } else if (circuit.state === CircuitState.CLOSED && circuit.failures >= this.config.failureThreshold) {
-        const now = Date.now();
-        const recentFailures = circuit.failures;
-
-        if (recentFailures >= this.config.failureThreshold) {
+      } else if (circuit.state === CircuitState.CLOSED) {
+        // Trip on consecutive staleness failures (stricter than general failure threshold)
+        if (
+          isStaleness &&
+          circuit.consecutiveStalenessFailures >= this.config.stalenessFailureThreshold
+        ) {
           circuit.state = CircuitState.OPEN;
-          circuit.nextAttemptTime = now + this.config.resetTimeoutMs;
-          this.logger.warn(`Circuit ${name} transitioned to OPEN (${recentFailures} failures)`);
+          circuit.nextAttemptTime = Date.now() + this.config.resetTimeoutMs;
+          this.logger.warn(
+            `Circuit ${name} transitioned to OPEN (${circuit.consecutiveStalenessFailures} consecutive staleness failures)`,
+          );
+        } else if (circuit.failures >= this.config.failureThreshold) {
+          circuit.state = CircuitState.OPEN;
+          circuit.nextAttemptTime = Date.now() + this.config.resetTimeoutMs;
+          this.logger.warn(`Circuit ${name} transitioned to OPEN (${circuit.failures} failures)`);
         }
       }
 
@@ -117,6 +145,7 @@ export class CircuitBreakerService {
     circuit.state = CircuitState.CLOSED;
     circuit.failures = 0;
     circuit.successes = 0;
+    circuit.consecutiveStalenessFailures = 0;
     delete circuit.nextAttemptTime;
     this.logger.log(`Circuit ${name} manually reset`);
   }

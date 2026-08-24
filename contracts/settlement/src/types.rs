@@ -61,6 +61,23 @@ pub struct NonceMeta {
     pub due_date: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriceAttestation {
+    pub asset_pair: Symbol,
+    pub price: i128,
+    pub ledger_sequence: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttestationRecord {
+    pub asset_pair: Symbol,
+    pub price: i128,
+    pub ledger_sequence: u32,
+    pub timestamp: u64,
+}
+
 impl NonceMeta {
     pub fn new(e: &Env, invoice_id: Symbol, due_date: u64) -> Self {
         NonceMeta {

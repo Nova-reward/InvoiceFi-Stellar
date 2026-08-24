@@ -157,5 +157,74 @@ describe('CircuitBreakerService', () => {
 
       expect(service.getState('manual-reset')).toBe(CircuitState.CLOSED);
     });
+
+    it('should trip after 3 consecutive staleness errors', async () => {
+      const stalenessError = new Error('StalePriceFeed');
+      const fn = jest.fn().mockRejectedValue(stalenessError);
+
+      for (let i = 0; i < 3; i++) {
+        try {
+          await service.execute('staleness-circuit', fn, undefined, {
+            isStalenessError: (error) => (error as Error).message === 'StalePriceFeed',
+          });
+        } catch (e) {
+          // Expected
+        }
+      }
+
+      expect(service.getState('staleness-circuit')).toBe(CircuitState.OPEN);
+    });
+
+    it('should not trip on non-staleness errors until general threshold', async () => {
+      const fn = jest.fn().mockRejectedValue(new Error('other'));
+
+      for (let i = 0; i < 4; i++) {
+        try {
+          await service.execute('non-staleness', fn, undefined, {
+            isStalenessError: (error) => (error as Error).message === 'StalePriceFeed',
+          });
+        } catch (e) {
+          // Expected
+        }
+      }
+
+      // Should still be closed (threshold is 5)
+      expect(service.getState('non-staleness')).toBe(CircuitState.CLOSED);
+    });
+
+    it('should reset staleness counter after success', async () => {
+      const stalenessError = new Error('StalePriceFeed');
+      const fn = jest.fn().mockRejectedValue(stalenessError);
+      const successFn = jest.fn().mockResolvedValue('ok');
+
+      // 2 staleness failures
+      for (let i = 0; i < 2; i++) {
+        try {
+          await service.execute('staleness-reset', fn, undefined, {
+            isStalenessError: (error) => (error as Error).message === 'StalePriceFeed',
+          });
+        } catch (e) {
+          // Expected
+        }
+      }
+
+      // Success resets staleness counter
+      await service.execute('staleness-reset', successFn, undefined, {
+        isStalenessError: (error) => (error as Error).message === 'StalePriceFeed',
+      });
+
+      // 2 more staleness failures should not trip (counter was reset)
+      for (let i = 0; i < 2; i++) {
+        try {
+          await service.execute('staleness-reset', fn, undefined, {
+            isStalenessError: (error) => (error as Error).message === 'StalePriceFeed',
+          });
+        } catch (e) {
+          // Expected
+        }
+      }
+
+      expect(service.getState('staleness-reset')).toBe(CircuitState.CLOSED);
+    });
   });
 });
