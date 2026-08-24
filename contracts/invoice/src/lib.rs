@@ -167,6 +167,9 @@ pub enum Error {
     ThresholdNotMet = 22,
     TimelockNotElapsed = 23,
     CannotGrantAdminRole = 24,
+    Overflow = 25,
+    Underflow = 26,
+    DivisionByZero = 27,
 }
 
 impl From<AcError> for Error {
@@ -187,6 +190,16 @@ impl From<AcError> for Error {
             AcError::ThresholdNotMet => Error::ThresholdNotMet,
             AcError::TimelockNotElapsed => Error::TimelockNotElapsed,
             AcError::CannotGrantAdminRole => Error::CannotGrantAdminRole,
+        }
+    }
+}
+
+impl From<common::CheckedMathError> for Error {
+    fn from(e: common::CheckedMathError) -> Self {
+        match e {
+            common::CheckedMathError::Overflow => Error::Overflow,
+            common::CheckedMathError::Underflow => Error::Underflow,
+            common::CheckedMathError::DivisionByZero => Error::DivisionByZero,
         }
     }
 }
@@ -238,7 +251,7 @@ impl InvoiceContract {
         }
 
         let id: u64 = env.storage().instance().get(&DataKey::Counter).unwrap_or(0);
-        let next = id + 1;
+        let next = common::checked_add(id as i128, 1)? as u64;
         env.storage().instance().set(&DataKey::Counter, &next);
 
         let invoice = Invoice {

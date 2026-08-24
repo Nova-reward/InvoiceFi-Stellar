@@ -20,23 +20,28 @@ export interface UseInvoiceNotificationsResult {
   connected: boolean;
 }
 
-/**
- * Subscribes to real-time invoice events from the NestJS WebSocket gateway.
- * @param url Backend WebSocket URL (default: http://localhost:4000)
- */
 export function useInvoiceNotifications(
-  url = 'http://localhost:4000',
+  url = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4000',
 ): UseInvoiceNotificationsResult {
   const [events, setEvents] = useState<InvoiceEvent[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(true); // Default true to prevent banner flash on mount
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    const socket = io(url, { transports: ['websocket'] });
+    // Configure socket with exponential backoff up to 30 seconds
+    const socket = io(url, {
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionDelay: 1000,      // Start with 1 second delay
+      reconnectionDelayMax: 30000,  // Max 30 seconds between attempts
+      randomizationFactor: 0.5,
+    });
+
     socketRef.current = socket;
 
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
+
     socket.on('invoice_event', (event: InvoiceEvent) => {
       setEvents((prev) => [event, ...prev]);
     });

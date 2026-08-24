@@ -23,6 +23,13 @@ fn unwrap_ac<T>(e: &Env, result: Result<T, AcError>) -> T {
     }
 }
 
+fn unwrap_math<T>(e: &Env, result: Result<T, common::CheckedMathError>) -> T {
+    match result {
+        Ok(v) => v,
+        Err(err) => panic_with_error!(e, SettlementError::from(err)),
+    }
+}
+
 pub trait SettlementTrait {
     fn init(e: Env, signers: Vec<Address>, threshold: u32, timelock_ledgers: u32);
     fn get_settlement_status(e: Env, invoice_id: Symbol) -> Option<u32>;
@@ -108,13 +115,13 @@ impl SettlementTrait for SettlementContract {
         unwrap_ac(&e, AccessControl::initialize(&e, signers, threshold, timelock_ledgers));
         e.storage()
             .instance()
-            .set(&StorageKey::instance("FEE_RATE"), &0u32);
+            .set(&StorageKey::FeeRate, &0u32);
         e.storage()
             .instance()
-            .set(&StorageKey::instance("COLLECTED_FEES"), &0i128);
+            .set(&StorageKey::CollectedFees, &0i128);
         e.storage()
             .instance()
-            .set(&StorageKey::instance("WITHDRAWN_FEES"), &0i128);
+            .set(&StorageKey::WithdrawnFees, &0i128);
         // Initialize reentrancy guard as unlocked
         e.storage()
             .instance()
@@ -140,19 +147,19 @@ impl SettlementTrait for SettlementContract {
     fn get_fee_rate(e: Env) -> Option<u32> {
         e.storage()
             .instance()
-            .get(&StorageKey::instance("FEE_RATE"))
+            .get(&StorageKey::FeeRate)
     }
 
     fn get_collected_fees(e: Env) -> Option<i128> {
         e.storage()
             .instance()
-            .get(&StorageKey::instance("COLLECTED_FEES"))
+            .get(&StorageKey::CollectedFees)
     }
 
     fn get_withdrawn_fees(e: Env) -> Option<i128> {
         e.storage()
             .instance()
-            .get(&StorageKey::instance("WITHDRAWN_FEES"))
+            .get(&StorageKey::WithdrawnFees)
     }
 
     fn list_authorized_payers(e: Env) -> soroban_sdk::Vec<Address> {
@@ -237,7 +244,7 @@ impl SettlementTrait for SettlementContract {
 
         e.storage()
             .instance()
-            .set(&StorageKey::instance("FEE_RATE"), &fee_rate);
+            .set(&StorageKey::FeeRate, &fee_rate);
 
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "fee_rate_set")),
@@ -254,7 +261,7 @@ impl SettlementTrait for SettlementContract {
 
         e.storage()
             .instance()
-            .set(&StorageKey::instance("ESCROW_PUBKEY"), &pubkey_bytes);
+            .set(&StorageKey::EscrowPubKey, &pubkey_bytes);
 
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "escrow_set")),
@@ -340,26 +347,27 @@ impl SettlementTrait for SettlementContract {
         let collected: i128 = e
             .storage()
             .instance()
-            .get(&StorageKey::instance("COLLECTED_FEES"))
+            .get(&StorageKey::CollectedFees)
             .unwrap_or(0);
 
         if amount > collected {
             panic!("Err: INSUFFICIENT_FEES");
         }
 
-        let new_collected = collected - amount;
+        let new_collected = unwrap_math(&e, common::checked_sub(collected, amount));
         e.storage()
             .instance()
-            .set(&StorageKey::instance("COLLECTED_FEES"), &new_collected);
+            .set(&StorageKey::CollectedFees, &new_collected);
 
         let withdrawn: i128 = e
             .storage()
             .instance()
-            .get(&StorageKey::instance("WITHDRAWN_FEES"))
+            .get(&StorageKey::WithdrawnFees)
             .unwrap_or(0);
+        let new_withdrawn = unwrap_math(&e, common::checked_add(withdrawn, amount));
         e.storage()
             .instance()
-            .set(&StorageKey::instance("WITHDRAWN_FEES"), &(withdrawn + amount));
+            .set(&StorageKey::WithdrawnFees, &new_withdrawn);
 
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "fees_withdrawn")),
@@ -443,22 +451,24 @@ impl SettlementTrait for SettlementContract {
         let fee_rate: u32 = e
             .storage()
             .instance()
-            .get(&StorageKey::instance("FEE_RATE"))
+            .get(&StorageKey::FeeRate)
             .unwrap_or(0);
-        let fee = (amount * fee_rate as i128) / 10000;
-        let net = amount - fee;
+        let fee_num = unwrap_math(&e, common::checked_mul(amount, fee_rate as i128));
+        let fee = unwrap_math(&e, common::checked_div(fee_num, 10000));
+        let net = unwrap_math(&e, common::checked_sub(amount, fee));
 
         // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
         let collected: i128 = e
             .storage()
             .instance()
-            .get(&StorageKey::instance("COLLECTED_FEES"))
+            .get(&StorageKey::CollectedFees)
             .unwrap_or(0);
+        let new_collected = unwrap_math(&e, common::checked_add(collected, fee));
         e.storage()
             .instance()
-            .set(&StorageKey::instance("COLLECTED_FEES"), &(collected + fee));
+            .set(&StorageKey::CollectedFees, &new_collected);
 
-        let new_principal = record.principal_paid + net;
+        let new_principal = unwrap_math(&e, common::checked_add(record.principal_paid, net));
         record.principal_paid = new_principal;
         let is_fully_settled = new_principal >= record.amount;
         if is_fully_settled {
@@ -481,7 +491,7 @@ impl SettlementTrait for SettlementContract {
         // Risk: Financing pool could re-enter this contract
         // Mitigation: Reentrancy guard is active, state already updated
         // Call ordering: State updated before this call (checks-effects-interactions)
-        if let Some(pool_address) = e.storage().instance().get(&StorageKey::FinancingPoolAddress) {
+        if let Some(pool_address) = e.storage().instance().get::<_, Address>(&StorageKey::FinancingPoolAddress) {
             // Note: In production, this would use soroban_sdk::invoke_contract
             // For now, we emit an event that the backend can use to orchestrate
             e.events().publish(
