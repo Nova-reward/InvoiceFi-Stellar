@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWallet } from '../../context/WalletContext';
 import { apiCall } from '../../lib/apiClient';
+import { WALLET_ADAPTERS } from '../../lib/wallets';
+import type { WalletAdapter } from '../../lib/wallets';
 
 export default function ConnectWalletPage() {
   const router = useRouter();
@@ -11,35 +13,30 @@ export default function ConnectWalletPage() {
   const [error, setError] = useState<string | null>(null);
   const [role, setRole] = useState<'FARMER' | 'INVESTOR'>('FARMER');
 
-  const handleConnectFreighter = async () => {
+  const handleConnectWallet = async (adapter: WalletAdapter) => {
     setError(null);
     setLoading(true);
 
     try {
-      const freighter = (window as any).FreighterApi;
-
-      if (!freighter) {
-        setError('Freighter wallet extension not detected. Please install it and try again.');
+      if (!adapter.isAvailable()) {
+        setError(
+          `${adapter.name} wallet extension not detected. Please install it and try again.`,
+        );
         setLoading(false);
         return;
       }
 
-      // Get public key from Freighter
-      const publicKey = await freighter.getPublicKey();
+      const publicKey = await adapter.connect();
 
       if (!publicKey) {
-        setError('Failed to get wallet address from Freighter.');
+        setError(`Failed to get wallet address from ${adapter.name}.`);
         setLoading(false);
         return;
       }
 
-      // Call backend to authenticate
       const { data, error: apiError, status } = await apiCall('/auth/connect-wallet', {
         method: 'POST',
-        body: JSON.stringify({
-          walletAddress: publicKey,
-          role,
-        }),
+        body: JSON.stringify({ walletAddress: publicKey, role }),
       });
 
       if (status !== 200 || !data) {
@@ -48,11 +45,9 @@ export default function ConnectWalletPage() {
         return;
       }
 
-      // Store token in cookie (backend handles this)
-      // Update wallet context
-      connect(data.walletAddress, data.role);
+      // Pass the adapter so WalletContext can watch it for disconnect events
+      connect(data.walletAddress, data.role, adapter);
 
-      // Redirect to dashboard
       router.push(`/dashboard/${role.toLowerCase()}`);
     } catch (err) {
       console.error('Connection error:', err);
@@ -92,18 +87,25 @@ export default function ConnectWalletPage() {
           </label>
         </div>
 
-        <button
-          onClick={handleConnectFreighter}
-          disabled={isLoading}
-          className="connect-button"
-        >
-          {isLoading ? 'Connecting...' : 'Connect Freighter Wallet'}
-        </button>
+        {/* Wallet list is generated dynamically — no wallet name is hard-coded */}
+        <div className="wallet-list">
+          {WALLET_ADAPTERS.map((adapter) => (
+            <button
+              key={adapter.name}
+              onClick={() => handleConnectWallet(adapter)}
+              disabled={isLoading}
+              className="connect-button"
+              aria-label={`Connect with ${adapter.name}`}
+            >
+              {isLoading ? 'Connecting...' : `Connect ${adapter.name} Wallet`}
+            </button>
+          ))}
+        </div>
 
         <div className="info-box">
           <h3>Requirements</h3>
           <ul>
-            <li>Freighter wallet extension installed</li>
+            <li>A supported Stellar wallet extension installed (Freighter, LOBSTR, or xBull)</li>
             <li>Active Stellar network account</li>
             <li>Sufficient balance for transactions</li>
           </ul>
@@ -163,6 +165,12 @@ export default function ConnectWalletPage() {
 
         .role-selector input[type='radio'] {
           cursor: pointer;
+        }
+
+        .wallet-list {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
         }
 
         .connect-button {
