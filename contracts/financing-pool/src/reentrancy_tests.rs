@@ -3,9 +3,9 @@
 //! These tests simulate malicious token contracts attempting to re-enter
 //! the financing pool during deposit/withdraw operations.
 
-use super::{FinancingPoolContract, DataKey, Error, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
+use super::{FinancingPoolContract, FinancingPoolContractClient, DataKey, Error, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
 use crate::types::{TokenContract, ReentrancyGuard, StorageKey};
-use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env, Vec};
 
 const DISCOUNT_BPS: u32 = 1000u32;
 
@@ -52,11 +52,12 @@ fn test_reentrancy_guard_blocks_deposit_reentry() {
     client.deposit(&lp, &1_000i128);
     
     // Verify reentrancy guard is unlocked after successful call
-    let guard: ReentrancyGuard = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard())
-        .unwrap_or(ReentrancyGuard::Unlocked);
+    let guard: ReentrancyGuard = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard())
+            .unwrap_or(ReentrancyGuard::Unlocked)
+    });
     assert_eq!(guard, ReentrancyGuard::Unlocked);
     
     // Verify balance was updated
@@ -80,11 +81,12 @@ fn test_reentrancy_guard_blocks_withdraw_reentry() {
     client.withdraw(&lp, &500i128);
     
     // Verify reentrancy guard is unlocked after successful call
-    let guard: ReentrancyGuard = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard())
-        .unwrap_or(ReentrancyGuard::Unlocked);
+    let guard: ReentrancyGuard = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard())
+            .unwrap_or(ReentrancyGuard::Unlocked)
+    });
     assert_eq!(guard, ReentrancyGuard::Unlocked);
     
     // Verify balance was updated
@@ -102,9 +104,11 @@ fn test_reentrancy_guard_blocks_when_locked_deposit() {
     init(&env, &client, &admin);
     
     // Manually lock the reentrancy guard to simulate mid-execution state
-    env.storage()
-        .instance()
-        .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
+    });
     
     let lp = Address::generate(&env);
     
@@ -129,9 +133,11 @@ fn test_reentrancy_guard_blocks_when_locked_withdraw() {
     client.deposit(&lp, &1_000i128);
     
     // Manually lock the reentrancy guard to simulate mid-execution state
-    env.storage()
-        .instance()
-        .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&StorageKey::reentrancy_guard(), &ReentrancyGuard::Locked);
+    });
     
     // This withdraw should fail due to reentrancy guard being locked
     assert_eq!(
@@ -150,20 +156,22 @@ fn test_reentrancy_guard_initialized_on_init() {
     let admin = Address::generate(&env);
     
     // Before init, guard should not exist
-    let guard_before: Option<ReentrancyGuard> = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard());
+    let guard_before: Option<ReentrancyGuard> = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard())
+    });
     assert_eq!(guard_before, None);
     
     init(&env, &client, &admin);
     
     // After init, guard should be Unlocked
-    let guard_after: ReentrancyGuard = env
-        .storage()
-        .instance()
-        .get(&StorageKey::reentrancy_guard())
-        .unwrap();
+    let guard_after: ReentrancyGuard = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::reentrancy_guard())
+            .unwrap()
+    });
     assert_eq!(guard_after, ReentrancyGuard::Unlocked);
 }
 
@@ -219,9 +227,9 @@ fn test_token_address_configuration() {
     client.set_token_address(&admin, &TokenContract::AQUA, &aqua_address);
     
     // Verify addresses are stored correctly
-    assert_eq!(client.get_token_address(TokenContract::XLM), Some(xlm_address));
-    assert_eq!(client.get_token_address(TokenContract::USDC), Some(usdc_address));
-    assert_eq!(client.get_token_address(TokenContract::AQUA), Some(aqua_address));
+    assert_eq!(client.get_token_address(&TokenContract::XLM), Some(xlm_address));
+    assert_eq!(client.get_token_address(&TokenContract::USDC), Some(usdc_address));
+    assert_eq!(client.get_token_address(&TokenContract::AQUA), Some(aqua_address));
 }
 
 #[test]
