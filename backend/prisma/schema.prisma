@@ -68,6 +68,8 @@ model Invoice {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
+  events       InvoiceEvent[]
+
   @@index([status])
   @@index([farmer])
   @@index([investor])
@@ -209,4 +211,39 @@ model WebhookDeliveryAttempt {
   durationMs    Int?
 
   @@index([deliveryId])
+}
+
+/// Append-only audit log of every Invoice.status transition (issue #162).
+/// Rows are created, never updated or deleted — callers must not add an
+/// `update`/`delete` on this model anywhere in the codebase.
+model InvoiceEvent {
+  id               String         @id @default(uuid())
+  /// References Invoice.onchainId rather than the internal Int id so callers
+  /// that already hold the on-chain id (settlement sync, funding) can record
+  /// an event without an extra lookup.
+  invoiceOnchainId BigInt
+  invoice          Invoice        @relation(fields: [invoiceOnchainId], references: [onchainId])
+  /// Null only for the very first event recorded for an invoice, if ever
+  /// emitted for creation; every transition event has a previous state.
+  previousStatus   InvoiceStatus?
+  newStatus        InvoiceStatus
+  /// Wallet address or service name that triggered the transition.
+  actorId          String
+  /// Soroban transaction hash for on-chain-triggered transitions. Null for
+  /// transitions with no associated on-chain transaction.
+  txHash           String?
+  /// Nanosecond-precision epoch timestamp captured in application code.
+  /// Postgres `timestamp` only carries microsecond precision and Node has no
+  /// native OS-level nanosecond wall-clock API, so this combines Date.now()
+  /// (ms) with the sub-millisecond remainder of process.hrtime() for extra
+  /// resolution. `sequence` (below), not this column, is the authoritative
+  /// append order; occurredAtNanos is for audit display / cross-system
+  /// correlation only.
+  occurredAtNanos  BigInt
+  /// DB-assigned monotonic append order; the source of truth for "ordered by
+  /// timestamp" queries.
+  sequence         Int            @default(autoincrement())
+  createdAt        DateTime       @default(now())
+
+  @@index([invoiceOnchainId, sequence])
 }

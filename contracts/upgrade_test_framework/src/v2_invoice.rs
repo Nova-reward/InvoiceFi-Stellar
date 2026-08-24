@@ -1,376 +1,174 @@
-//! v2 test-double for the Invoice contract.
-//!
-//! Identical storage layout to v1.  Adds:
-//! - `version() -> u32`  returns 2
-//! - `upgrade(new_wasm: BytesN<32>)` (admin-only) — calls
-//!   `env.update_current_contract_wasm`
-//!
-//! This file is compiled as part of the `upgrade_test_framework` crate so it
-//! is only ever loaded by tests, never deployed to production.
+use soroban_sdk::{contract, contracttype, Address, Env, String, Vec};
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
-};
-
-use access_control::{AccessControl, Role, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
-
-// ── Replicate v1 types (identical XDR layout) ────────────────────────────────
-
+// ===== V1 Storage Format =====
 #[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
-    Pending  = 0,
-    Funded   = 1,
-    Settled  = 2,
-    Defaulted = 3,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Invoice {
-    pub id: u64,
-    pub owner: Address,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct V1InvoiceData {
+    pub id: String,
+    pub seller: Address,
+    pub buyer: Address,
     pub amount: i128,
-    pub crop: Symbol,
-    pub due_date: u64,
-    pub metadata: String,
-    pub status: Status,
+    pub asset: String,
+    pub created_at: u64,
+    pub status: V1InvoiceStatus,
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvoiceToken {
-    pub invoice_id: u64,
-    pub face_value: i128,
-    pub discount_rate: u32,
-    pub due_date: u64,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum V1InvoiceStatus {
+    Pending,
+    Funded,
+    Paid,
+    Defaulted,
+}
+
+// ===== V2 Storage Format (with new mandatory fields) =====
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct V2InvoiceData {
+    pub id: String,
+    pub seller: Address,
+    pub buyer: Address,
+    pub amount: i128,
+    pub asset: String,
+    pub created_at: u64,
+    pub status: V2InvoiceStatus,
+    // NEW MANDATORY FIELDS - V1 → V2 upgrade
+    pub metadata: String,                  // New mandatory field
+    pub collateral: i128,                 // New mandatory field
+    pub maturity_date: u64,               // New mandatory field
+    pub payment_terms: V2PaymentTerms,    // New mandatory field
+    pub version: u32,                     // Version tracking
 }
 
 #[contracttype]
-enum DataKey {
-    Counter,
-    Invoice(u64),
-    Token(u64),
-    Approval(u64),
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum V2InvoiceStatus {
+    Pending,
+    Funded,
+    Paid,
+    Defaulted,
+    Disputed,        // NEW status
+    Settled,         // NEW status
 }
 
-const MAX_DISCOUNT_BPS: u32 = 10_000;
-const INVOICE_TTL_THRESHOLD: u32 = 17_280;
-const INVOICE_TTL_EXTEND: u32 = 120_960;
-
-// ── v2 contract ───────────────────────────────────────────────────────────────
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct V2PaymentTerms {
+    pub due_days: u32,
+    pub late_penalty_bps: i128,
+    pub grace_period_days: u32,
+}
 
 #[contract]
-pub struct InvoiceContractV2;
+pub struct V2InvoiceContract;
 
 #[contractimpl]
-impl InvoiceContractV2 {
-    // ── NEW in v2 ─────────────────────────────────────────────────────────────
+impl V2InvoiceContract {
+    /// Migrate from V1 to V2 storage format
+    pub fn migrate(env: Env, invoice_id: String) -> Result<(), MigrationError> {
+        // 1. Read V1 data
+        let v1_data: V1InvoiceData = env.storage()
+            .get(&invoice_id)
+            .ok_or(MigrationError::V1DataNotFound)?;
 
-    /// Returns the contract version. Added in v2.
-    pub fn version(_env: Env) -> u32 {
-        2
-    }
+        // 2. Validate migration conditions
+        // Check if already migrated to V2
+        let version_key = Self::version_key(invoice_id.clone());
+        if env.storage().has(&version_key) {
+            return Err(MigrationError::AlreadyMigrated);
+        }
 
-    /// Admin-only entry point that upgrades the running WASM to `new_wasm`.
-    /// The caller must be a current admin signer.
-    pub fn upgrade(env: Env, caller: Address, new_wasm: BytesN<32>) {
-        caller.require_auth();
-        AccessControl::require_admin(&env, &caller)
-            .expect("upgrade: caller is not an admin signer");
-        env.deployer().update_current_contract_wasm(new_wasm);
-    }
+        // Check migration guard conditions
+        // Guard 1: Invoice must be in a valid state for migration
+        if v1_data.status == V1InvoiceStatus::Pending {
+            return Err(MigrationError::CannotMigratePendingInvoice);
+        }
 
-    // ── Carried over from v1 (identical implementation) ───────────────────────
+        // 3. Transform V1 data to V2 format
+        let v2_data = Self::transform_to_v2(&env, v1_data);
 
-    pub fn initialize(
-        env: Env,
-        signers: Vec<Address>,
-        threshold: u32,
-        timelock_ledgers: u32,
-    ) -> Result<(), invoice_contract::Error> {
-        AccessControl::initialize(&env, signers, threshold, timelock_ledgers)
-            .map_err(invoice_contract::Error::from)?;
-        env.storage().instance().set(&DataKey::Counter, &0u64);
+        // 4. Write V2 data
+        env.storage().set(&invoice_id, &v2_data);
+        env.storage().set(&version_key, &2u32);
+
+        // 5. Emit migration event
+        env.events().publish(
+            ("migration", "v1_to_v2"),
+            (invoice_id, 2u32, env.ledger().timestamp()),
+        );
+
         Ok(())
     }
 
-    pub fn mint(
-        env: Env,
-        owner: Address,
-        amount: i128,
-        crop: Symbol,
-        due_date: u64,
-        metadata: String,
-    ) -> Result<u64, invoice_contract::Error> {
-        Self::require_initialized(&env)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
-        owner.require_auth();
-        if amount <= 0 {
-            return Err(invoice_contract::Error::InvalidAmount);
-        }
-        let id: u64 = env.storage().instance().get(&DataKey::Counter).unwrap_or(0);
-        let next = id + 1;
-        env.storage().instance().set(&DataKey::Counter, &next);
-        let invoice = Invoice {
-            id: next,
-            owner,
-            amount,
-            crop,
-            due_date,
+    /// Transform V1 data to V2 format
+    fn transform_to_v2(env: &Env, v1: V1InvoiceData) -> V2InvoiceData {
+        // Map V1 status to V2 status
+        let v2_status = match v1.status {
+            V1InvoiceStatus::Pending => V2InvoiceStatus::Pending,
+            V1InvoiceStatus::Funded => V2InvoiceStatus::Funded,
+            V1InvoiceStatus::Paid => V2InvoiceStatus::Paid,
+            V1InvoiceStatus::Defaulted => V2InvoiceStatus::Defaulted,
+        };
+
+        // Generate new mandatory fields from V1 data
+        let metadata = format!(
+            "migrated: invoice_{}_seller_{}",
+            v1.id, v1.seller.to_string()
+        );
+
+        let collateral = v1.amount / 10; // 10% collateral based on invoice amount
+        let maturity_date = v1.created_at + (30 * 24 * 60 * 60); // 30 days maturity
+
+        let payment_terms = V2PaymentTerms {
+            due_days: 30,
+            late_penalty_bps: 500, // 5%
+            grace_period_days: 3,
+        };
+
+        V2InvoiceData {
+            id: v1.id,
+            seller: v1.seller,
+            buyer: v1.buyer,
+            amount: v1.amount,
+            asset: v1.asset,
+            created_at: v1.created_at,
+            status: v2_status,
             metadata,
-            status: Status::Pending,
-        };
-        Self::save(&env, &invoice);
-        Ok(next)
+            collateral,
+            maturity_date,
+            payment_terms,
+            version: 2,
+        }
     }
 
-    pub fn fund(
-        env: Env,
-        caller: Address,
-        invoice_id: u64,
-        discount_rate: u32,
-    ) -> Result<(), invoice_contract::Error> {
-        Self::require_initialized(&env)?;
-        AccessControl::require_role(&env, Role::LiquidityManager, &caller)
-            .map_err(invoice_contract::Error::from)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
-        if discount_rate >= MAX_DISCOUNT_BPS {
-            return Err(invoice_contract::Error::InvalidDiscountRate);
+    /// Version key for tracking
+    fn version_key(id: String) -> String {
+        format!("{}_v2", id)
+    }
+
+    /// Get V2 data (with migration check)
+    pub fn get_invoice(env: Env, invoice_id: String) -> Result<V2InvoiceData, MigrationError> {
+        // Check version first
+        let version_key = Self::version_key(invoice_id.clone());
+        if !env.storage().has(&version_key) {
+            // Try to read V1 data and migrate
+            Self::migrate(env.clone(), invoice_id.clone())?;
         }
-        let mut invoice = Self::load(&env, invoice_id)?;
-        if invoice.status != Status::Pending {
-            return Err(invoice_contract::Error::InvalidTransition);
-        }
-        invoice.status = Status::Funded;
-        Self::save(&env, &invoice);
-        let token = InvoiceToken {
-            invoice_id,
-            face_value: invoice.amount,
-            discount_rate,
-            due_date: invoice.due_date,
-        };
-        let key = DataKey::Token(invoice_id);
-        env.storage().persistent().set(&key, &token);
+
         env.storage()
-            .persistent()
-            .extend_ttl(&key, INVOICE_TTL_THRESHOLD, INVOICE_TTL_EXTEND);
-        Ok(())
+            .get(&invoice_id)
+            .ok_or(MigrationError::InvoiceNotFound)
     }
+}
 
-    pub fn update_status(
-        env: Env,
-        caller: Address,
-        invoice_id: u64,
-        new_status: Status,
-    ) -> Result<(), invoice_contract::Error> {
-        Self::require_initialized(&env)?;
-        AccessControl::require_admin(&env, &caller)
-            .map_err(invoice_contract::Error::from)?;
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
-        let mut invoice = Self::load(&env, invoice_id)?;
-        if !Self::transition_allowed(invoice.status, new_status) {
-            return Err(invoice_contract::Error::InvalidTransition);
-        }
-        invoice.status = new_status;
-        Self::save(&env, &invoice);
-        Ok(())
-    }
-
-    pub fn transfer(
-        env: Env,
-        from: Address,
-        to: Address,
-        invoice_id: u64,
-    ) -> Result<(), invoice_contract::Error> {
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
-        from.require_auth();
-        let invoice = Self::load(&env, invoice_id)?;
-        if invoice.owner != from {
-            return Err(invoice_contract::Error::NotOwner);
-        }
-        Self::do_transfer(&env, invoice, from, to, invoice_id)
-    }
-
-    pub fn approve(
-        env: Env,
-        owner: Address,
-        spender: Address,
-        invoice_id: u64,
-    ) -> Result<(), invoice_contract::Error> {
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
-        owner.require_auth();
-        let invoice = Self::load(&env, invoice_id)?;
-        if !Self::is_tokenized_inner(&env, invoice_id) {
-            return Err(invoice_contract::Error::NotTokenized);
-        }
-        if invoice.owner != owner {
-            return Err(invoice_contract::Error::NotOwner);
-        }
-        let key = DataKey::Approval(invoice_id);
-        env.storage().persistent().set(&key, &spender);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, INVOICE_TTL_THRESHOLD, INVOICE_TTL_EXTEND);
-        Ok(())
-    }
-
-    pub fn transfer_from(
-        env: Env,
-        spender: Address,
-        from: Address,
-        to: Address,
-        invoice_id: u64,
-    ) -> Result<(), invoice_contract::Error> {
-        AccessControl::require_not_paused(&env)
-            .map_err(invoice_contract::Error::from)?;
-        spender.require_auth();
-        let invoice = Self::load(&env, invoice_id)?;
-        if !Self::is_tokenized_inner(&env, invoice_id) {
-            return Err(invoice_contract::Error::NotTokenized);
-        }
-        if invoice.owner != from {
-            return Err(invoice_contract::Error::NotOwner);
-        }
-        let approved: Option<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Approval(invoice_id));
-        match approved {
-            Some(addr) if addr == spender => {}
-            _ => return Err(invoice_contract::Error::NotApproved),
-        }
-        Self::do_transfer(&env, invoice, from, to, invoice_id)
-    }
-
-    // ── Read-only views ───────────────────────────────────────────────────────
-
-    pub fn get_invoice(env: Env, invoice_id: u64) -> Result<Invoice, invoice_contract::Error> {
-        Self::load(&env, invoice_id)
-    }
-
-    pub fn owner_of(env: Env, invoice_id: u64) -> Result<Address, invoice_contract::Error> {
-        Ok(Self::load(&env, invoice_id)?.owner)
-    }
-
-    pub fn status_of(env: Env, invoice_id: u64) -> Result<Status, invoice_contract::Error> {
-        Ok(Self::load(&env, invoice_id)?.status)
-    }
-
-    pub fn get_invoice_token(env: Env, invoice_id: u64) -> Result<InvoiceToken, invoice_contract::Error> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Token(invoice_id))
-            .ok_or(invoice_contract::Error::NotTokenized)
-    }
-
-    pub fn is_tokenized(env: Env, invoice_id: u64) -> bool {
-        Self::is_tokenized_inner(&env, invoice_id)
-    }
-
-    pub fn get_approved(env: Env, invoice_id: u64) -> Result<Address, invoice_contract::Error> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Approval(invoice_id))
-            .ok_or(invoice_contract::Error::NotApproved)
-    }
-
-    pub fn total_minted(env: Env) -> u64 {
-        env.storage().instance().get(&DataKey::Counter).unwrap_or(0)
-    }
-
-    pub fn exists(env: Env, invoice_id: u64) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::Invoice(invoice_id))
-    }
-
-    pub fn is_signer(env: Env, addr: Address) -> bool {
-        AccessControl::is_signer(&env, &addr)
-    }
-
-    pub fn has_role(env: Env, role: Role, addr: Address) -> bool {
-        AccessControl::has_role(&env, role, &addr)
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        AccessControl::is_paused(&env)
-    }
-
-    pub fn grant_role(env: Env, caller: Address, role: Role, grantee: Address) -> Result<(), invoice_contract::Error> {
-        Ok(AccessControl::grant_role(&env, &caller, role, grantee)
-            .map_err(invoice_contract::Error::from)?)
-    }
-
-    pub fn pause(env: Env, caller: Address) -> Result<(), invoice_contract::Error> {
-        Ok(AccessControl::pause(&env, &caller)
-            .map_err(invoice_contract::Error::from)?)
-    }
-
-    pub fn unpause(env: Env, caller: Address) -> Result<(), invoice_contract::Error> {
-        Ok(AccessControl::unpause(&env, &caller)
-            .map_err(invoice_contract::Error::from)?)
-    }
-
-    // ── Internals ─────────────────────────────────────────────────────────────
-
-    fn transition_allowed(from: Status, to: Status) -> bool {
-        matches!(
-            (from, to),
-            (Status::Pending, Status::Defaulted)
-                | (Status::Funded, Status::Settled)
-                | (Status::Funded, Status::Defaulted)
-        )
-    }
-
-    fn is_tokenized_inner(env: &Env, invoice_id: u64) -> bool {
-        env.storage().persistent().has(&DataKey::Token(invoice_id))
-    }
-
-    fn do_transfer(
-        env: &Env,
-        mut invoice: Invoice,
-        from: Address,
-        to: Address,
-        invoice_id: u64,
-    ) -> Result<(), invoice_contract::Error> {
-        if from == to {
-            return Err(invoice_contract::Error::SameOwnerTransfer);
-        }
-        if invoice.status == Status::Settled {
-            return Err(invoice_contract::Error::TransferAfterRepayment);
-        }
-        invoice.owner = to;
-        Self::save(env, &invoice);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Approval(invoice_id));
-        Ok(())
-    }
-
-    fn save(env: &Env, invoice: &Invoice) {
-        let key = DataKey::Invoice(invoice.id);
-        env.storage().persistent().set(&key, invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, INVOICE_TTL_THRESHOLD, INVOICE_TTL_EXTEND);
-    }
-
-    fn load(env: &Env, invoice_id: u64) -> Result<Invoice, invoice_contract::Error> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Invoice(invoice_id))
-            .ok_or(invoice_contract::Error::InvoiceNotFound)
-    }
-
-    fn require_initialized(env: &Env) -> Result<(), invoice_contract::Error> {
-        AccessControl::multisig(env)
-            .map(|_| ())
-            .map_err(invoice_contract::Error::from)
-    }
+// ===== Migration Errors =====
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MigrationError {
+    V1DataNotFound = 1,
+    AlreadyMigrated = 2,
+    CannotMigratePendingInvoice = 3,
+    InvoiceNotFound = 4,
+    MigrationFailed = 5,
 }

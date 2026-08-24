@@ -14,6 +14,8 @@ export interface NormalizedEvent {
   topics: unknown[];
   /** Decoded event data payload. */
   value: unknown;
+  /** Hash of the transaction that emitted this event, when the RPC response includes one. */
+  txHash?: string;
 }
 
 /** A successfully parsed `InvoiceSettled` event. */
@@ -22,4 +24,6 @@ export interface SettlementEvent {
   invoiceId: string;
   /** Ledger sequence the settlement was observed in. */
   ledger: number;
+  /** Hash of the settlement transaction, for the invoice_events audit log (issue #162). */
+  txHash?: string;
 }

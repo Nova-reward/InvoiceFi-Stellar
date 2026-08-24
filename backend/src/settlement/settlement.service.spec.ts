@@ -13,6 +13,9 @@ interface TxMock {
     updateMany: jest.Mock;
     findUnique: jest.Mock;
   };
+  invoiceEvent: {
+    create: jest.Mock;
+  };
 }
 
 function buildPrisma(tx: TxMock): { prisma: PrismaService; tx: TxMock } {
@@ -31,11 +34,13 @@ function buildWebhookDispatch(): WebhookDispatchService {
 describe('SettlementService', () => {
   const tx: TxMock = {
     invoice: { updateMany: jest.fn(), findUnique: jest.fn() },
+    invoiceEvent: { create: jest.fn() },
   };
 
   beforeEach(() => {
     tx.invoice.updateMany.mockReset();
     tx.invoice.findUnique.mockReset();
+    tx.invoiceEvent.create.mockReset().mockResolvedValue(undefined);
   });
 
   it('transitions FUNDED -> REPAID atomically and records ledger/time', async () => {
@@ -44,7 +49,7 @@ describe('SettlementService', () => {
     const webhookDispatch = buildWebhookDispatch();
     const service = new SettlementService(prisma, webhookDispatch);
 
-    const result = await service.settleInvoice('7', 4242);
+    const result = await service.settleInvoice('7', 4242, 'deadbeef');
 
     expect(result).toBe(SettlementResult.SETTLED);
     const args = tx.invoice.updateMany.mock.calls[0][0];
@@ -57,6 +62,16 @@ describe('SettlementService', () => {
     expect(args.data.settledAt).toBeInstanceOf(Date);
     // Never had to look the invoice up — the conditional update did the work.
     expect(tx.invoice.findUnique).not.toHaveBeenCalled();
+
+    // Appends an append-only audit event for the FUNDED -> REPAID transition.
+    expect(tx.invoiceEvent.create).toHaveBeenCalledTimes(1);
+    const eventArgs = tx.invoiceEvent.create.mock.calls[0][0].data;
+    expect(eventArgs.invoiceOnchainId).toBe(7n);
+    expect(eventArgs.previousStatus).toBe(InvoiceStatus.FUNDED);
+    expect(eventArgs.newStatus).toBe(InvoiceStatus.REPAID);
+    expect(eventArgs.actorId).toBe('settlement-sync-service');
+    expect(eventArgs.txHash).toBe('deadbeef');
+    expect(typeof eventArgs.occurredAtNanos).toBe('bigint');
   });
 
   it('enqueues a "repaid" webhook event on a fresh settlement', async () => {
