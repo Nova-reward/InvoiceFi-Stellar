@@ -28,7 +28,7 @@
     "@nestjs/platform-express": "^11.1.28",
     "@nestjs/schedule": "^6.0.0",
     "@nestjs/throttler": "^6.5.0",
-    "@prisma/client": "^6.0.0",
+    "@prisma/client": "^7.9.1",
     "@stellar/stellar-sdk": "^17.0.0",
     "nodemailer": "^9.0.5",
     "passport": "^0.7.0",
