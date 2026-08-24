@@ -64,5 +64,5 @@ export function parseSettlementEvent(
     return null;
   }
 
-  return { invoiceId, ledger: event.ledger };
+  return { invoiceId, ledger: event.ledger, txHash: event.txHash };
 }

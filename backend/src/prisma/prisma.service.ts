@@ -8,6 +8,12 @@ import { PrismaClient } from '@prisma/client';
 import { VaultService } from '../config/vault/vault.service';
 
 /**
+ * The interactive-transaction callback signature supported by PrismaClient.
+ * Typed narrowly to avoid pulling in the full internal Prisma namespace.
+ */
+type TransactionCallback<T> = (tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>) => Promise<T>;
+
+/**
  * PrismaService
  *
  * Wraps PrismaClient with two enhancements:
@@ -75,6 +81,18 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
 
   get syncCursor() {
     return this.client.syncCursor;
+  }
+
+  get webhookSubscription() {
+    return this.client.webhookSubscription;
+  }
+
+  get webhookDelivery() {
+    return this.client.webhookDelivery;
+  }
+
+  get webhookDeliveryAttempt() {
+    return this.client.webhookDeliveryAttempt;
   }
 
   // Extend with additional model getters as the Prisma schema grows.

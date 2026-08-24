@@ -57,6 +57,7 @@ export class SorobanEventsService {
       contractId: String(event.contractId ?? ''),
       topics,
       value: this.decode(event.value),
+      txHash: (event as { txHash?: string }).txHash,
     };
   }
 

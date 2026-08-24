@@ -15,6 +15,9 @@ use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, Symbol, Vec,
 };
 
+/// Maximum age (in ledgers) for an oracle price feed before it is considered stale.
+pub const MAX_PRICE_AGE_LEDGERS: u32 = 100;
+
 // NOTE: `error.rs` is a pre-existing, unused scaffold left over from an
 // earlier iteration of this contract (it doesn't match this API, and its own
 // `mod tests;` doesn't resolve) — intentionally not wired in via `mod error;`.
@@ -76,6 +79,8 @@ enum DataKey {
     Balance(Address),
     /// Funding record keyed by invoice id.
     Funding(u64),
+    /// Oracle price feed: (price, timestamp_ledger).
+    PriceFeed,
 }
 
 #[contracterror]
@@ -108,6 +113,8 @@ pub enum Error {
     ThresholdNotMet = 20,
     TimelockNotElapsed = 21,
     CannotGrantAdminRole = 22,
+    /// Oracle price feed is stale (older than MAX_PRICE_AGE_LEDGERS).
+    StalePriceFeed = 23,
 }
 
 impl From<access_control::AcError> for Error {
@@ -142,7 +149,7 @@ pub struct FinancingPoolContract;
 impl FinancingPoolContract {
     /// One-time initialization. `signers`/`threshold` define the n-of-m admin
     /// signer set; `timelock_ledgers` gates signer-set changes (minimum
-    /// [`access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS`]).
+    /// [`access_control::MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS]`).
     ///
     /// `discount_bps` is the funding discount in basis points and must be
     /// strictly less than 10_000 (100%).
@@ -188,9 +195,9 @@ impl FinancingPoolContract {
         }
 
         // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
-        let balance = Self::balance_inner(&env, &from) + amount;
+        let balance = common::checked_add(Self::balance_inner(&env, &from), amount)?;
         Self::set_balance(&env, &from, balance);
-        Self::set_available(&env, Self::available_inner(&env) + amount);
+        Self::set_available(&env, common::checked_add(Self::available_inner(&env), amount)?);
 
         // SAFETY: Set reentrancy guard before token transfer
         env.storage()
@@ -201,7 +208,7 @@ impl FinancingPoolContract {
         // Risk: Token contract could re-enter this contract
         // Mitigation: Reentrancy guard is active, state already updated
         // Call ordering: State updated before this call (checks-effects-interactions)
-        if let Some(token_address) = env.storage().instance().get(&StorageKey::token_address(&TokenContract::XLM)) {
+        if let Some(token_address) = env.storage().instance().get::<_, Address>(&StorageKey::token_address(&TokenContract::XLM)) {
             // Note: In production, this would use soroban_sdk::invoke_contract to transfer tokens
             // For now, we emit an event that the backend can use to orchestrate
             env.events().publish(
@@ -212,7 +219,7 @@ impl FinancingPoolContract {
             // Fallback: emit event without actual transfer for now
             env.events().publish(
                 (Symbol::new(&env, "pool"), Symbol::new(&env, "deposit_pending_token")),
-                (from, amount),
+                (from.clone(), amount),
             );
         }
 
@@ -257,8 +264,8 @@ impl FinancingPoolContract {
         }
 
         // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
-        Self::set_balance(&env, &to, balance - amount);
-        Self::set_available(&env, available - amount);
+        Self::set_balance(&env, &to, common::checked_sub(balance, amount)?);
+        Self::set_available(&env, common::checked_sub(available, amount)?);
 
         // SAFETY: Set reentrancy guard before token transfer
         env.storage()
@@ -269,7 +276,7 @@ impl FinancingPoolContract {
         // Risk: Token contract could re-enter this contract
         // Mitigation: Reentrancy guard is active, state already updated
         // Call ordering: State updated before this call (checks-effects-interactions)
-        if let Some(token_address) = env.storage().instance().get(&StorageKey::token_address(&TokenContract::XLM)) {
+        if let Some(token_address) = env.storage().instance().get::<_, Address>(&StorageKey::token_address(&TokenContract::XLM)) {
             // Note: In production, this would use soroban_sdk::invoke_contract to transfer tokens
             // For now, we emit an event that the backend can use to orchestrate
             env.events().publish(
@@ -280,7 +287,7 @@ impl FinancingPoolContract {
             // Fallback: emit event without actual transfer for now
             env.events().publish(
                 (Symbol::new(&env, "pool"), Symbol::new(&env, "withdraw_pending_token")),
-                (to, amount),
+                (to.clone(), amount),
             );
         }
 
@@ -298,7 +305,8 @@ impl FinancingPoolContract {
     ///
     /// Credits `recipient` with `face_value - discount` and records the
     /// funding. Rejects zero/negative face values, invoices already funded,
-    /// and requests that exceed available liquidity. Returns the advance.
+    /// requests that exceed available liquidity, and calls where the oracle
+    /// price feed is stale. Returns the advance.
     pub fn fund_invoice(
         env: Env,
         caller: Address,
@@ -321,14 +329,17 @@ impl FinancingPoolContract {
             return Err(Error::AlreadyFunded);
         }
 
+        // Staleness guard: refuse to fund if the oracle feed is too old.
+        Self::require_fresh_price_feed(&env)?;
+
         let advance = Self::advance_for(&env, face_value);
         let available = Self::available_inner(&env);
         if available < advance {
             return Err(Error::InsufficientLiquidity);
         }
 
-        Self::set_available(&env, available - advance);
-        let recipient_balance = Self::balance_inner(&env, &recipient) + advance;
+        Self::set_available(&env, common::checked_sub(available, advance)?);
+        let recipient_balance = common::checked_add(Self::balance_inner(&env, &recipient), advance)?;
         Self::set_balance(&env, &recipient, recipient_balance);
 
         let funding = Funding {
@@ -359,7 +370,7 @@ impl FinancingPoolContract {
         if face_value <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(Self::advance_for(&env, face_value))
+        Ok(Self::advance_for(&env, face_value)?)
     }
 
     /// Discount (in tokens) that would be retained on a given face value.
@@ -367,7 +378,8 @@ impl FinancingPoolContract {
         if face_value <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(face_value - Self::advance_for(&env, face_value))
+        let advance = Self::advance_for(&env, face_value)?;
+        Ok(common::checked_sub(face_value, advance)?)
     }
 
     pub fn balance_of(env: Env, addr: Address) -> i128 {
@@ -423,6 +435,27 @@ impl FinancingPoolContract {
         env.storage()
             .instance()
             .get(&StorageKey::token_address(&token))
+    }
+
+    /// Set the oracle price feed tuple (price, timestamp_ledger). Requires
+    /// an admin signer. Intended to be called by the backend/oracle adapter.
+    pub fn set_price_feed(
+        env: Env,
+        caller: Address,
+        price: i128,
+        timestamp: u32,
+    ) -> Result<(), Error> {
+        Self::require_initialized(&env)?;
+        AccessControl::require_admin(&env, &caller)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PriceFeed, &(price, timestamp));
+        Ok(())
+    }
+
+    /// Get the current oracle price feed tuple, if any.
+    pub fn get_price_feed(env: Env) -> Option<(i128, u32)> {
+        env.storage().instance().get(&DataKey::PriceFeed)
     }
 
     // ---- access control ---------------------------------------------------
@@ -507,7 +540,7 @@ impl FinancingPoolContract {
 
     // ---- internals -------------------------------------------------------
 
-    fn advance_for(env: &Env, face_value: i128) -> i128 {
+    fn advance_for(env: &Env, face_value: i128) -> Result<i128, common::CheckedMathError> {
         let bps: u32 = env
             .storage()
             .instance()
@@ -515,7 +548,9 @@ impl FinancingPoolContract {
             .unwrap_or(0);
         // Floor division: any rounding loss is retained by the pool as extra
         // discount, never over-advanced to the recipient.
-        face_value * (BPS_DENOMINATOR - bps as i128) / BPS_DENOMINATOR
+        let discount = common::checked_sub(BPS_DENOMINATOR, bps as i128)?;
+        let numer = common::checked_mul(face_value, discount)?;
+        common::checked_div(numer, BPS_DENOMINATOR)
     }
 
     fn balance_inner(env: &Env, addr: &Address) -> i128 {
@@ -545,6 +580,30 @@ impl FinancingPoolContract {
     fn require_initialized(env: &Env) -> Result<(), Error> {
         AccessControl::multisig(env)?;
         Ok(())
+    }
+
+    /// Panics with `StalePriceFeed` if the stored oracle timestamp is older
+    /// than `MAX_PRICE_AGE_LEDGERS` relative to the current ledger sequence.
+    fn require_fresh_price_feed(env: &Env) -> Result<(), Error> {
+        let current_ledger: u32 = env.ledger().sequence();
+        let feed: Option<(i128, u32)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PriceFeed);
+        match feed {
+            Some((_price, timestamp)) => {
+                let age = current_ledger.saturating_sub(timestamp);
+                if age > MAX_PRICE_AGE_LEDGERS {
+                    return Err(Error::StalePriceFeed);
+                }
+                Ok(())
+            }
+            None => {
+                // No feed set yet: treat as stale to prevent funding until
+                // an oracle source is configured.
+                Err(Error::StalePriceFeed)
+            }
+        }
     }
 }
 

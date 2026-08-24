@@ -31,6 +31,10 @@ pub enum SettlementError {
     ThresholdNotMet = 25,
     TimelockNotElapsed = 26,
     CannotGrantAdminRole = 27,
+    InvalidAttestationSignature = 28,
+    AttestationReplay = 29,
+    EscrowPubkeyNotSet = 30,
+    InvalidAttestationPayload = 31,
 }
 
 impl From<access_control::AcError> for SettlementError {
