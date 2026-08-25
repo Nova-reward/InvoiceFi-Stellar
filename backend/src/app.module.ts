@@ -1,5 +1,6 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ComplianceModule } from './compliance/compliance.module';
 import { HealthModule } from './health/health.module';
@@ -31,7 +32,10 @@ import { RateLimitMiddleware } from './common/rate-limit.middleware';
     HealthModule,
     OracleMonitorModule,
   ],
-  providers: [RedisService, RateLimiterService, CircuitBreakerService],
+  // JwtService is used by the rate-limit middleware to verify bearer claims
+  // before controller guards run; the signing secret is supplied from Vault
+  // at verification time rather than stored in this module.
+  providers: [RedisService, RateLimiterService, CircuitBreakerService, JwtService],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

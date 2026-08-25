@@ -41,6 +41,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Run checked math linter
+        run: bash ../scripts/check-unchecked-math.sh
+
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets -- -D warnings
 

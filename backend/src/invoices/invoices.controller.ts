@@ -1,5 +1,6 @@
 import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
 import { InvoiceDto, InvoicesService } from './invoices.service';
+import { InvoiceEventDto } from './invoice-event.service';
 
 @Controller()
 export class InvoicesController {
@@ -17,6 +18,12 @@ export class InvoicesController {
       throw new NotFoundException(`Invoice ${onchainId} not found`);
     }
     return invoice;
+  }
+
+  /** Full append-only status-transition history for one invoice (issue #162). */
+  @Get('invoices/:id/events')
+  events(@Param('id') id: string): Promise<InvoiceEventDto[]> {
+    return this.invoices.events(id);
   }
 
   @Get('dashboard/farmer/:address')

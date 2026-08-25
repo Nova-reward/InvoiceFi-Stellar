@@ -68,6 +68,8 @@ model Invoice {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
+  events       InvoiceEvent[]
+
   @@index([status])
   @@index([farmer])
   @@index([investor])
@@ -198,6 +200,7 @@ model WebhookDelivery {
 /// Immutable log entry for one delivery attempt, queryable via the delivery
 /// log API for debugging subscriber-side failures.
 model WebhookDeliveryAttempt {
+
   id            String          @id @default(uuid())
   delivery      WebhookDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
   deliveryId    String
@@ -209,4 +212,24 @@ model WebhookDeliveryAttempt {
   durationMs    Int?
 
   @@index([deliveryId])
+}
+
+/// Persistent audit record written by the DLQ processor when an invoice-
+/// reminder job exhausts all Bull retries. One row per exhausted job.
+/// Provides an ops-queryable failure log independent of the transient
+/// Redis queue state.
+model InvoiceReminderFailure {
+  id           String   @id @default(uuid())
+  /// The invoice that could not be reminded. Stored as a string because the
+  /// invoice-reminder module targets a richer schema (User + dueDate) that is
+  /// not yet fully migrated; keeps the failure log loosely coupled.
+  invoiceId    String
+  errorMessage String
+  attemptCount Int
+  /// Bull job ID for cross-referencing queue history logs.
+  jobId        String?
+  failedAt     DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([failedAt])
 }
