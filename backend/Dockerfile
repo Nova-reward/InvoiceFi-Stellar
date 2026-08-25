@@ -49,5 +49,8 @@ USER nestjs
 
 EXPOSE 4000
 
+# Enable read-only root filesystem with explicit tmpfs mounts
+VOLUME ["/tmp"]
+
 # Run migrations then start the server
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]

@@ -1,0 +1,157 @@
+name: Migration CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/prisma/migrations/**'
+      - 'backend/prisma/schema.prisma'
+      - '.github/workflows/migration-ci.yml'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'backend/prisma/migrations/**'
+      - 'backend/prisma/schema.prisma'
+
+concurrency:
+  group: migration-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-migrations:
+    name: Validate Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: invoicefi
+          POSTGRES_PASSWORD: invoicefi_test
+          POSTGRES_DB: invoicefi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Generate Prisma Client
+        working-directory: backend
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://invoicefi:invoicefi_test@localhost:5432/invoicefi_test
+
+      - name: Check migration naming convention
+        working-directory: backend
+        run: |
+          bash ../scripts/validate-migration-naming.sh
+
+      - name: Apply all migrations to fresh database
+        working-directory: backend
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://invoicefi:invoicefi_test@localhost:5432/invoicefi_test
+
+      - name: Verify schema matches Prisma schema
+        working-directory: backend
+        run: |
+          npx prisma db pull
+          if [ -n "$(git diff prisma/schema.prisma)" ]; then
+            echo "::error::Schema drift detected. Applied migrations do not match schema.prisma"
+            git diff prisma/schema.prisma
+            exit 1
+          fi
+        env:
+          DATABASE_URL: postgresql://invoicefi:invoicefi_test@localhost:5432/invoicefi_test
+
+      - name: Test migration reversibility
+        working-directory: backend
+        run: |
+          bash ../scripts/test-migration-reversibility.sh
+        env:
+          DATABASE_URL: postgresql://invoicefi:invoicefi_test@localhost:5432/invoicefi_test
+
+      - name: Validate expand-contract pattern compliance
+        working-directory: backend
+        run: |
+          bash ../scripts/validate-expand-contract.sh
+
+  validate-new-migrations:
+    name: Validate New Migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: invoicefi
+          POSTGRES_PASSWORD: invoicefi_test
+          POSTGRES_DB: invoicefi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Get base branch migrations
+        id: base-migrations
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          BASE_MIGRATIONS=$(git diff --name-only origin/${{ github.base_ref }} HEAD -- backend/prisma/migrations/ | wc -l)
+          echo "count=$BASE_MIGRATIONS" >> $GITHUB_OUTPUT
+
+      - name: Check for new migrations
+        if: steps.base-migrations.outputs.count == 0
+        run: |
+          echo "::warning::No new migrations detected in this PR"
+
+      - name: Test new migration up and down
+        if: steps.base-migrations.outputs.count > 0
+        working-directory: backend
+        run: |
+          bash ../scripts/test-new-migration.sh ${{ github.base_ref }}
+        env:
+          DATABASE_URL: postgresql://invoicefi:invoicefi_test@localhost:5432/invoicefi_test

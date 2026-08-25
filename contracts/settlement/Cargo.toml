@@ -1,13 +1,14 @@
 [package]
 name = "settlement"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+access-control = { path = "../access-control" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

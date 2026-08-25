@@ -1,0 +1,486 @@
+* {
+  box-sizing: border-box;
+}
+
+/* ── Design tokens ──────────────────────────────────────────────────────── */
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #111827;
+  background: #f9fafb;
+
+  /* Status badge — light mode
+     Contrast ratios verified against WCAG 2.1 AA (≥ 4.5:1 for small text):
+       funded:   #5b21b6 on #ede9fe  → 7.57:1 ✓
+       repaid:   #166534 on #dcfce7  → 6.49:1 ✓
+       defaulted:#991b1b on #fee2e2  → 6.80:1 ✓  */
+  --status-funded-bg: #ede9fe;
+  --status-funded-color: #5b21b6;
+  --status-repaid-bg: #dcfce7;
+  --status-repaid-color: #166534;
+  --status-defaulted-bg: #fee2e2;
+  --status-defaulted-color: #991b1b;
+
+  /* Focus ring color — meets 3:1 against white per WCAG 2.1 SC 1.4.11 */
+  --focus-ring-color: #4f46e5;
+}
+
+/* ── Dark-mode overrides ────────────────────────────────────────────────── */
+/*
+   Dark mode contrast ratios (≥ 4.5:1):
+     funded:   #c4b5fd on #3b0764  → 8.12:1 ✓
+     repaid:   #86efac on #052e16  → 10.62:1 ✓
+     defaulted:#fca5a5 on #450a0a  → 8.51:1 ✓
+*/
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f9fafb;
+    background: #111827;
+
+    --status-funded-bg: #3b0764;
+    --status-funded-color: #c4b5fd;
+    --status-repaid-bg: #052e16;
+    --status-repaid-color: #86efac;
+    --status-defaulted-bg: #450a0a;
+    --status-defaulted-color: #fca5a5;
+
+    --focus-ring-color: #818cf8;
+  }
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #f3f4f6;
+}
+
+.page-shell {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+.page-header {
+  margin-bottom: 24px;
+}
+
+.page-header h1 {
+  margin: 0 0 8px;
+  font-size: clamp(2rem, 2.5vw, 3rem);
+}
+
+.page-header p {
+  margin: 0;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+.investor-table-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 18px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+  padding: 24px;
+}
+
+.table-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.filter-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.95rem;
+  color: #374151;
+}
+
+.filter-group select {
+  min-width: 120px;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #111827;
+}
+
+.summary-text {
+  color: #6b7280;
+  align-self: center;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 840px;
+}
+
+th,
+td {
+  padding: 16px 14px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+th {
+  color: #374151;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.sortable span {
+  margin-left: 6px;
+  font-size: 0.8rem;
+}
+
+tbody tr:hover {
+  background: #f9fafb;
+}
+
+td {
+  font-size: 0.95rem;
+  color: #1f2937;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+/* Status colors use CSS custom properties so dark-mode overrides work
+   automatically. Contrast ratios are documented in :root above. */
+.status-funded {
+  background: var(--status-funded-bg);
+  color: var(--status-funded-color);
+}
+
+.status-repaid {
+  background: var(--status-repaid-bg);
+  color: var(--status-repaid-color);
+}
+
+.status-defaulted {
+  background: var(--status-defaulted-bg);
+  color: var(--status-defaulted-color);
+}
+
+/* ── Focus styles — WCAG 2.1 SC 2.4.7 & SC 1.4.11 ──────────────────────── */
+/*
+  Visible focus indicator on all interactive elements:
+  - 2 px solid ring offset from element boundary
+  - Uses brand indigo (#4f46e5 / --focus-ring-color) which is ≥ 3:1
+    against white backgrounds.
+  - Removes browser default outline only when our ring is present.
+*/
+:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* Remove the default outline only for mouse clicks, keep it for keyboard */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Sortable table header focus ring */
+th.sortable:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+  background: #f5f3ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  th.sortable:focus-visible {
+    background: #1e1b4b;
+  }
+}
+
+/* Pagination button focus ring */
+.pagination-controls button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* Filter select focus ring */
+.filter-group select:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.pagination-controls button {
+  padding: 10px 16px;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #111827;
+  cursor: pointer;
+  min-width: 110px;
+}
+
+.pagination-controls button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.empty-state {
+  padding: 48px 28px;
+  text-align: center;
+  background: #ffffff;
+  border: 1px dashed #d1d5db;
+  border-radius: 20px;
+}
+
+.empty-state h2 {
+  margin: 0 0 12px;
+  font-size: 1.75rem;
+}
+
+.empty-state p {
+  margin: 0 0 24px;
+  color: #4b5563;
+}
+
+.cta-button {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 999px;
+  background: #4f46e5;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Screen reader only class */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Offline Indicator */
+.offline-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+  padding: 12px 24px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  animation: slideDown 0.3s ease-out;
+}
+
+.offline-banner.online {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.offline-banner-content {
+  max-width: 1160px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.offline-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.offline-text {
+  flex: 1;
+}
+
+/* Conflict Resolution Modal */
+.conflict-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  padding: 20px;
+}
+
+.conflict-content {
+  background: white;
+  border-radius: 12px;
+  max-width: 900px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  padding: 32px;
+}
+
+.conflict-content h2 {
+  margin: 0 0 8px;
+  font-size: 1.5rem;
+  color: #dc2626;
+}
+
+.conflict-content > p:first-of-type {
+  margin: 0 0 24px;
+  color: #6b7280;
+  line-height: 1.6;
+}
+
+.conflict-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.conflict-column h3 {
+  margin: 0 0 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.conflict-data {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.conflict-data pre {
+  margin: 0;
+  font-size: 0.85rem;
+  font-family: 'Courier New', monospace;
+  color: #1f2937;
+  line-height: 1.5;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.conflict-btn {
+  flex: 1;
+  min-width: 200px;
+  padding: 12px 16px;
+  border: none;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  font-size: 0.95rem;
+  transition: all 0.2s ease;
+}
+
+.conflict-btn-local {
+  background: #3b82f6;
+  color: white;
+}
+
+.conflict-btn-local:hover {
+  background: #2563eb;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+.conflict-btn-server {
+  background: #8b5cf6;
+  color: white;
+}
+
+.conflict-btn-server:hover {
+  background: #7c3aed;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+}
+
+.conflict-btn-merge {
+  background: #10b981;
+  color: white;
+}
+
+.conflict-btn-merge:hover {
+  background: #059669;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.conflict-note {
+  margin: 0;
+  padding: 12px;
+  background: #fef3c7;
+  border-left: 4px solid #f59e0b;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: #92400e;
+  line-height: 1.6;
+}
+
+@media (max-width: 768px) {
+  .conflict-comparison {
+    grid-template-columns: 1fr;
+  }
+
+  .conflict-actions {
+    flex-direction: column;
+  }
+
+  .conflict-btn {
+    min-width: auto;
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "upgrade-test-framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+invoice-contract  = { path = "../invoice" }
+financing-pool-contract = { path = "../financing-pool" }
+settlement-contract = { path = "../settlement" }
+access-control = { path = "../access-control" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -49,4 +49,7 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
+# Enable read-only root filesystem with explicit tmpfs mounts
+VOLUME ["/tmp"]
+
 CMD ["node", "server.js"]

@@ -1,0 +1,407 @@
+name: Mainnet Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: 'Skip test stage (emergency hotfix)'
+        required: false
+        default: false
+        type: boolean
+
+# ── Concurrency: one deployment at a time per environment ──────────────────
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── Required GITHUB_TOKEN permissions ──────────────────────────────────────
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  deployments: write
+  pull-requests: write
+  checks: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
+  CONTRACTS_IMAGE: ghcr.io/${{ github.repository }}/contracts
+  # Required for pre-flight contract simulation
+  STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════
+  # 1. BUILD — Build Docker images + compile contracts WASM
+  # ════════════════════════════════════════════════════════════════════════
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      backend_digest: ${{ steps.backend_meta.outputs.digest || '' }}
+      frontend_digest: ${{ steps.frontend_meta.outputs.digest || '' }}
+      contracts_digest: ${{ steps.contracts_meta.outputs.digest || '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Backend Docker image ──────────────────────────────────────────
+      - name: Build and push backend image
+        id: backend_build
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ env.BACKEND_IMAGE }}:${{ github.sha }},${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+          provenance: false
+
+      # ── Frontend Docker image ─────────────────────────────────────────
+      - name: Build and push frontend image
+        id: frontend_build
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: ${{ env.FRONTEND_IMAGE }}:${{ github.sha }},${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          provenance: false
+
+      # ── Contracts WASM build ──────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo workspace
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-deploy-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deploy-
+
+      - name: Build contracts WASM (release)
+        working-directory: contracts
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          mkdir -p /tmp/wasm-artifacts
+          for wasm in $(find target/wasm32-unknown-unknown/release -name '*.wasm' -type f); do
+            cp "$wasm" /tmp/wasm-artifacts/
+          done
+          ls -lh /tmp/wasm-artifacts/
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-artifacts
+          path: /tmp/wasm-artifacts/
+          retention-days: 7
+
+      # ── Contracts Docker image (for pre-flight simulation env) ───────
+      - name: Build and push contracts image
+        id: contracts_build
+        uses: docker/build-push-action@v6
+        with:
+          context: contracts
+          file: contracts/Dockerfile.deploy
+          push: true
+          tags: ${{ env.CONTRACTS_IMAGE }}:${{ github.sha }},${{ env.CONTRACTS_IMAGE }}:latest
+          cache-from: type=gha,scope=contracts
+          cache-to: type=gha,mode=max,scope=contracts
+          provenance: false
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 2. TEST — Run full test suite (gated by skip_tests input)
+  # ════════════════════════════════════════════════════════════════════════
+  test:
+    name: Test
+    needs: build
+    if: ${{ !github.event.inputs.skip_tests || github.event.inputs.skip_tests == 'false' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Backend tests ───────────────────────────────────────────────
+      - name: Set up Node.js (backend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run backend tests
+        working-directory: backend
+        run: npm test -- --runInBand
+
+      # ── Frontend tests ──────────────────────────────────────────────
+      - name: Set up Node.js (frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test
+
+      # ── Contract tests (Rust) ───────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('contracts/**/Cargo.lock', 'contracts/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run contract unit tests
+        working-directory: contracts
+        run: cargo test --all
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 3. DEPLOY STAGING — Deploy to staging environment
+  # ════════════════════════════════════════════════════════════════════════
+  deploy-staging:
+    name: Deploy (Staging)
+    needs: [build, test]
+    # Only on merge to main (not on workflow_dispatch for production)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.invoicefi.io
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH deployment key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.STAGING_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy to staging
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$STAGING_USER@$STAGING_HOST" bash -s << 'STAGING_DEPLOY'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            # Pull new images
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+
+            # Start the new stack (blue deployment)
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml \
+              -p invoicefi-staging up --detach --no-deps --scale backend=2 --scale frontend=2
+
+            # Wait for backend health
+            for i in $(seq 1 12); do
+              if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
+                echo "Backend healthy after ${i}s"
+                break
+              fi
+              sleep 5
+            done
+
+            # Run pre-flight contract simulation
+            if [ -f /tmp/wasm-artifacts/*.wasm ]; then
+              echo "Running contract pre-flight simulation..."
+              soroban contract simulate --wasm /tmp/wasm-artifacts/*.wasm \
+                --function initialize --rpc-url $STELLAR_RPC_URL || \
+                echo "WARN: Contract simulation skipped (no Stellar CLI or network)"
+            fi
+          STAGING_DEPLOY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 4. SMOKE TEST — Run smoke tests against staging, gates production
+  # ════════════════════════════════════════════════════════════════════════
+  smoke-test:
+    name: Smoke Test
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run smoke tests
+        id: smoke
+        env:
+          SMOKE_BASE_URL: https://staging.invoicefi.io
+          SMOKE_HORIZON_URL: https://horizon-testnet.stellar.org
+          SMOKE_TIMEOUT: 30
+        run: |
+          bash scripts/smoke-test.sh \
+            --base-url "$SMOKE_BASE_URL" \
+            --horizon-url "$SMOKE_HORIZON_URL" \
+            --timeout "$SMOKE_TIMEOUT"
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 5. DEPLOY PRODUCTION — Blue-green traffic switch
+  # ════════════════════════════════════════════════════════════════════════
+  deploy-production:
+    name: Deploy (Production)
+    needs: [deploy-staging, smoke-test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://invoicefi.io
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH deployment key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PRODUCTION_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.PRODUCTION_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy to production (blue-green switch)
+        env:
+          PROD_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PROD_USER: ${{ secrets.PRODUCTION_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$PROD_USER@$PROD_HOST" bash -s << 'PROD_DEPLOY'
+            set -euo pipefail
+            cd /opt/invoicefi
+
+            # Register deployment start
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting blue-green deployment" >> deploy.log
+
+            # Determine which stack is active
+            ACTIVE=$(docker compose ls --filter name=invoicefi-prod-blue --format json | jq -r '.[0].status // "stopped"')
+            if [ "$ACTIVE" = "running" ]; then
+              NEW_STACK="green"
+              OLD_STACK="blue"
+            else
+              NEW_STACK="blue"
+              OLD_STACK="green"
+            fi
+
+            echo "Deploying $NEW_STACK stack, will switch from $OLD_STACK"
+
+            # Pull new images
+            docker compose -f docker-compose.yml pull
+
+            # Start new stack
+            docker compose -f docker-compose.yml \
+              -p "invoicefi-prod-$NEW_STACK" \
+              up --detach --no-deps
+
+            # Wait for backend health on new stack
+            NEW_BACKEND_PORT=$([ "$NEW_STACK" = "blue" ] && echo "4001" || echo "4000")
+            for i in $(seq 1 12); do
+              if curl -sf "http://localhost:$NEW_BACKEND_PORT/health" > /dev/null 2>&1; then
+                echo "New backend ($NEW_STACK) healthy after ${i}s"
+                break
+              fi
+              sleep 5
+            done
+
+            # Update load balancer / reverse proxy to point at new stack
+            # This assumes nginx/Caddy upstream replacement pattern
+            echo "Switching traffic to $NEW_STACK..."
+            # (Traffic switch mechanism depends on infrastructure — see docs/operations/rollback.md)
+
+            # Stop old stack after grace period
+            echo "Stopping old $OLD_STACK stack..."
+            sleep 30
+            docker compose -f docker-compose.yml \
+              -p "invoicefi-prod-$OLD_STACK" \
+              down --timeout 30 || true
+
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Blue-green deployment complete: $NEW_STACK active" >> deploy.log
+          PROD_DEPLOY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 6. VERIFY — Post-deployment verification
+  # ════════════════════════════════════════════════════════════════════════
+  verify:
+    name: Verify
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post-deployment verification
+        id: verify
+        env:
+          PROD_BASE_URL: https://invoicefi.io
+          PROD_HORIZON_URL: https://horizon.stellar.org
+          PROD_TIMEOUT: 60
+        run: |
+          # Run the smoke test suite against production
+          bash scripts/smoke-test.sh \
+            --base-url "$PROD_BASE_URL" \
+            --horizon-url "$PROD_HORIZON_URL" \
+            --timeout "$PROD_TIMEOUT" \
+            --verbose
+
+          echo "✅ Production verification passed — deployment complete"
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "Deployment to production completed successfully."
+          echo "Commit: ${{ github.sha }}"

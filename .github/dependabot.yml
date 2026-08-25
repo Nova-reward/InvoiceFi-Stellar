@@ -1,0 +1,58 @@
+version: 2
+updates:
+  # Enable Docker image updates for frontend and backend
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "Darkdante9"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(docker):"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
+
+  # Enable npm package updates for frontend
+  - package-ecosystem: npm
+    directory: "frontend"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "Darkdante9"
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "chore(deps-frontend):"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
+
+  # Enable npm package updates for backend
+  - package-ecosystem: npm
+    directory: "backend"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "Darkdante9"
+    labels:
+      - "dependencies"
+      - "backend"
+    commit-message:
+      prefix: "chore(deps-backend):"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
