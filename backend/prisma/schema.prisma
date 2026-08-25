@@ -68,6 +68,8 @@ model Invoice {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
+  events       InvoiceEvent[]
+
   @@index([status])
   @@index([farmer])
   @@index([investor])

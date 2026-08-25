@@ -195,9 +195,9 @@ impl FinancingPoolContract {
         }
 
         // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
-        let balance = Self::balance_inner(&env, &from) + amount;
+        let balance = common::checked_add(Self::balance_inner(&env, &from), amount)?;
         Self::set_balance(&env, &from, balance);
-        Self::set_available(&env, Self::available_inner(&env) + amount);
+        Self::set_available(&env, common::checked_add(Self::available_inner(&env), amount)?);
 
         // SAFETY: Set reentrancy guard before token transfer
         env.storage()
@@ -208,7 +208,7 @@ impl FinancingPoolContract {
         // Risk: Token contract could re-enter this contract
         // Mitigation: Reentrancy guard is active, state already updated
         // Call ordering: State updated before this call (checks-effects-interactions)
-        if let Some(token_address) = env.storage().instance().get(&StorageKey::token_address(&TokenContract::XLM)) {
+        if let Some(token_address) = env.storage().instance().get::<_, Address>(&StorageKey::token_address(&TokenContract::XLM)) {
             // Note: In production, this would use soroban_sdk::invoke_contract to transfer tokens
             // For now, we emit an event that the backend can use to orchestrate
             env.events().publish(
@@ -219,7 +219,7 @@ impl FinancingPoolContract {
             // Fallback: emit event without actual transfer for now
             env.events().publish(
                 (Symbol::new(&env, "pool"), Symbol::new(&env, "deposit_pending_token")),
-                (from, amount),
+                (from.clone(), amount),
             );
         }
 
@@ -264,8 +264,8 @@ impl FinancingPoolContract {
         }
 
         // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
-        Self::set_balance(&env, &to, balance - amount);
-        Self::set_available(&env, available - amount);
+        Self::set_balance(&env, &to, common::checked_sub(balance, amount)?);
+        Self::set_available(&env, common::checked_sub(available, amount)?);
 
         // SAFETY: Set reentrancy guard before token transfer
         env.storage()
@@ -276,7 +276,7 @@ impl FinancingPoolContract {
         // Risk: Token contract could re-enter this contract
         // Mitigation: Reentrancy guard is active, state already updated
         // Call ordering: State updated before this call (checks-effects-interactions)
-        if let Some(token_address) = env.storage().instance().get(&StorageKey::token_address(&TokenContract::XLM)) {
+        if let Some(token_address) = env.storage().instance().get::<_, Address>(&StorageKey::token_address(&TokenContract::XLM)) {
             // Note: In production, this would use soroban_sdk::invoke_contract to transfer tokens
             // For now, we emit an event that the backend can use to orchestrate
             env.events().publish(
@@ -287,7 +287,7 @@ impl FinancingPoolContract {
             // Fallback: emit event without actual transfer for now
             env.events().publish(
                 (Symbol::new(&env, "pool"), Symbol::new(&env, "withdraw_pending_token")),
-                (to, amount),
+                (to.clone(), amount),
             );
         }
 
@@ -338,8 +338,8 @@ impl FinancingPoolContract {
             return Err(Error::InsufficientLiquidity);
         }
 
-        Self::set_available(&env, available - advance);
-        let recipient_balance = Self::balance_inner(&env, &recipient) + advance;
+        Self::set_available(&env, common::checked_sub(available, advance)?);
+        let recipient_balance = common::checked_add(Self::balance_inner(&env, &recipient), advance)?;
         Self::set_balance(&env, &recipient, recipient_balance);
 
         let funding = Funding {
@@ -370,7 +370,7 @@ impl FinancingPoolContract {
         if face_value <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(Self::advance_for(&env, face_value))
+        Ok(Self::advance_for(&env, face_value)?)
     }
 
     /// Discount (in tokens) that would be retained on a given face value.
@@ -378,7 +378,8 @@ impl FinancingPoolContract {
         if face_value <= 0 {
             return Err(Error::InvalidAmount);
         }
-        Ok(face_value - Self::advance_for(&env, face_value))
+        let advance = Self::advance_for(&env, face_value)?;
+        Ok(common::checked_sub(face_value, advance)?)
     }
 
     pub fn balance_of(env: Env, addr: Address) -> i128 {
@@ -539,7 +540,7 @@ impl FinancingPoolContract {
 
     // ---- internals -------------------------------------------------------
 
-    fn advance_for(env: &Env, face_value: i128) -> i128 {
+    fn advance_for(env: &Env, face_value: i128) -> Result<i128, common::CheckedMathError> {
         let bps: u32 = env
             .storage()
             .instance()
@@ -547,7 +548,9 @@ impl FinancingPoolContract {
             .unwrap_or(0);
         // Floor division: any rounding loss is retained by the pool as extra
         // discount, never over-advanced to the recipient.
-        face_value * (BPS_DENOMINATOR - bps as i128) / BPS_DENOMINATOR
+        let discount = common::checked_sub(BPS_DENOMINATOR, bps as i128)?;
+        let numer = common::checked_mul(face_value, discount)?;
+        common::checked_div(numer, BPS_DENOMINATOR)
     }
 
     fn balance_inner(env: &Env, addr: &Address) -> i128 {

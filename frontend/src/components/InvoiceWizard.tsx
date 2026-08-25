@@ -1,7 +1,16 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useTransactionSimulation } from '../../hooks/useTransactionSimulation';
+import { TransactionSimulationPreview } from '../../components/TransactionSimulationPreview';
+import {
+  NETWORK_PASSPHRASE,
+  buildSimulationRequest,
+  scValAddress,
+  scValI128,
+  scValU64,
+} from '../../lib/soroban';
 
 const invoiceSchema = z.object({
   cropName: z.string().min(2, 'Crop name is required'),
@@ -36,6 +45,9 @@ export function InvoiceWizard() {
   const [currentStep, setCurrentStep] = useState<StepKey>('details');
   const [hasSubmitted, setHasSubmitted] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const pendingXdrRef = useRef<string | null>(null);
+  const simulation = useTransactionSimulation();
 
   const form = useForm<InvoiceForm>({
     resolver: zodResolver(invoiceSchema),
@@ -102,14 +114,76 @@ export function InvoiceWizard() {
     }
   };
 
-  const onFinalConfirm = handleSubmit(() => {
-    setHasSubmitted(true);
-    setCurrentStep('submitted');
-    const freighterAvailable = typeof window !== 'undefined' && 'FreighterApi' in window;
-    if (freighterAvailable) {
-      alert('Freighter signing prompt triggered for final confirmation.');
+  const getSignerAddress = (): string => {
+    if (typeof sessionStorage === 'undefined') return '';
+    return sessionStorage.getItem('walletAddress') ?? '';
+  };
+
+  const getConfiguredContractId = (): string => {
+    if (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_INVOICE_CONTRACT_ID) {
+      return process.env.NEXT_PUBLIC_INVOICE_CONTRACT_ID;
+    }
+    return '';
+  };
+
+  const onFinalConfirm = handleSubmit(async () => {
+    setErrorMessage('');
+    setPreviewOpen(true);
+
+    try {
+      const signerAddress = getSignerAddress();
+      const faceValue = Math.round(values.quantity * values.unitPrice);
+      const request = await buildSimulationRequest({
+        contractId: getConfiguredContractId(),
+        functionName: 'fund_invoice',
+        signerAddress,
+        args: [
+          scValAddress(signerAddress),
+          scValU64(1),
+          scValI128(faceValue),
+          scValAddress(signerAddress),
+        ],
+      });
+      pendingXdrRef.current = request.transactionXdr;
+      await simulation.simulate(request);
+    } catch (error) {
+      // The transaction could not be prepared (missing wallet, contract, or
+      // network). Surface it as a preflight error so the Sign button stays
+      // disabled instead of letting the user sign an unbuildable transaction.
+      pendingXdrRef.current = null;
+      await simulation.simulate({
+        transactionXdr: '',
+        functionName: 'fund_invoice',
+        contractId: getConfiguredContractId() || 'unavailable',
+        signerAddress: getSignerAddress() || 'unavailable',
+      });
     }
   });
+
+  const handleSignTransaction = async () => {
+    setPreviewOpen(false);
+    try {
+      const freighter = (window as any).FreighterApi;
+      if (freighter && pendingXdrRef.current) {
+        await freighter.signTransaction(pendingXdrRef.current, {
+          networkPassphrase: NETWORK_PASSPHRASE,
+        });
+      }
+      setHasSubmitted(true);
+      setCurrentStep('submitted');
+    } catch {
+      setErrorMessage('Signing was cancelled or failed. No transaction was submitted.');
+    } finally {
+      simulation.reset();
+      pendingXdrRef.current = null;
+    }
+  };
+
+  const handleCancelPreview = () => {
+    setPreviewOpen(false);
+    simulation.reset();
+    pendingXdrRef.current = null;
+  };
 
   const renderStepContent = () => {
     if (currentStep === 'details') {
@@ -299,28 +373,39 @@ export function InvoiceWizard() {
   };
 
   return (
-    <form className="wizard-shell" onSubmit={(event) => event.preventDefault()}>
-      <div role="status" aria-live="assertive" aria-atomic="true" className="sr-only">
-        {errorMessage}
-      </div>
-      <div className="progress-wrapper" aria-label="Invoice creation progress">
-        <div className="progress-bar" style={{ width: `${progress}%` }} aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} role="progressbar" />
-        <div className="progress-labels">
-          {stepOrder.slice(0, 3).map((step) => (
-            <button
-              key={step}
-              type="button"
-              className={`progress-step ${currentStep === step ? 'active' : ''}`}
-              onClick={() => goToStep(step)}
-              aria-current={currentStep === step ? 'step' : undefined}
-            >
-              {stepLabels[step]}
-            </button>
-          ))}
+    <>
+      <form className="wizard-shell" onSubmit={(event) => event.preventDefault()}>
+        <div role="status" aria-live="assertive" aria-atomic="true" className="sr-only">
+          {errorMessage}
         </div>
-      </div>
+        <div className="progress-wrapper" aria-label="Invoice creation progress">
+          <div className="progress-bar" style={{ width: `${progress}%` }} aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100} role="progressbar" />
+          <div className="progress-labels">
+            {stepOrder.slice(0, 3).map((step) => (
+              <button
+                key={step}
+                type="button"
+                className={`progress-step ${currentStep === step ? 'active' : ''}`}
+                onClick={() => goToStep(step)}
+                aria-current={currentStep === step ? 'step' : undefined}
+              >
+                {stepLabels[step]}
+              </button>
+            ))}
+          </div>
+        </div>
 
-      {renderStepContent()}
-    </form>
+        {renderStepContent()}
+      </form>
+
+      <TransactionSimulationPreview
+        open={previewOpen}
+        status={simulation.status}
+        details={simulation.details}
+        preflightError={simulation.preflightError}
+        onSign={handleSignTransaction}
+        onCancel={handleCancelPreview}
+      />
+    </>
   );
 }

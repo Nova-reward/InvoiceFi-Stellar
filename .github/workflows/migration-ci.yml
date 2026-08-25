@@ -6,6 +6,8 @@ on:
       - 'backend/prisma/migrations/**'
       - 'backend/prisma/schema.prisma'
       - '.github/workflows/migration-ci.yml'
+      - 'scripts/test-expand-contract-harness.sh'
+      - 'scripts/validate-expand-contract.sh'
   push:
     branches:
       - main
@@ -155,3 +157,41 @@ jobs:
           bash ../scripts/test-new-migration.sh ${{ github.base_ref }}
         env:
           DATABASE_URL: postgresql://invoicefi:invoicefi_test@localhost:5432/invoicefi_test
+
+  # ---------------------------------------------------------------------------
+  # Expand-Contract Zero-Downtime Harness
+  # ---------------------------------------------------------------------------
+  # Proves the three-migration investor->funder rename series is zero-downtime
+  # by applying migrations one at a time, asserting schema at each phase,
+  # running backend unit-tests at the intermediate checkpoint, and verifying
+  # data integrity throughout.
+  expand-contract-harness:
+    name: Expand/Contract Zero-Downtime Harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run expand/contract zero-downtime harness
+        # The harness manages its own ephemeral Postgres container on port 5444.
+        # It applies migrations phase by phase, seeds data, and asserts schema
+        # and data integrity at each step.
+        run: bash scripts/test-expand-contract-harness.sh
+
+      - name: Validate expand-contract static rules (skip-check)
+        # Runs the static validator to catch any migration that skips the
+        # intermediate backfill step in a rename series.
+        run: bash scripts/validate-expand-contract.sh

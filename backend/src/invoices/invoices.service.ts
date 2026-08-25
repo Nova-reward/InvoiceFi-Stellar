@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Invoice } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { InvoiceEventDto, InvoiceEventService } from './invoice-event.service';
 
 /** API representation of an invoice with BigInt fields rendered as strings. */
 export interface InvoiceDto {
@@ -33,7 +34,10 @@ function toDto(invoice: Invoice): InvoiceDto {
 
 @Injectable()
 export class InvoicesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly invoiceEvents: InvoiceEventService,
+  ) {}
 
   async findAll(): Promise<InvoiceDto[]> {
     const invoices = await this.prisma.invoice.findMany({
@@ -63,5 +67,16 @@ export class InvoicesService {
       orderBy: { createdAt: 'desc' },
     });
     return invoices.map(toDto);
+  }
+
+  /** Full append-only event history for an invoice, ordered oldest first. */
+  async events(onchainId: string): Promise<InvoiceEventDto[]> {
+    const invoice = await this.prisma.invoice.findUnique({
+      where: { onchainId: BigInt(onchainId) },
+    });
+    if (!invoice) {
+      throw new NotFoundException(`Invoice ${onchainId} not found`);
+    }
+    return this.invoiceEvents.listByOnchainId(invoice.onchainId);
   }
 }
