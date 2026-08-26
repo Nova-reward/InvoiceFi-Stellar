@@ -1,0 +1,35 @@
+name: Storage Key Collision Check
+
+on:
+  push:
+    branches: [ main, issue-150 ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check-storage-collision:
+    name: Check Storage Key Collision & Namespacing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            contracts/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Storage Key Collision Check
+        run: |
+          chmod +x scripts/check-storage-keys.sh
+          ./scripts/check-storage-keys.sh
