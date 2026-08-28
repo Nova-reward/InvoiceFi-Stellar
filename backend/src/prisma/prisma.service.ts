@@ -95,6 +95,10 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     return this.client.webhookDeliveryAttempt;
   }
 
+  get idempotencyKey() {
+    return this.client.idempotencyKey;
+  }
+
   // Extend with additional model getters as the Prisma schema grows.
   // e.g.:  get user() { return this.client.user; }
 

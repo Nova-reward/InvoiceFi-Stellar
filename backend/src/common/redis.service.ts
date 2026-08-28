@@ -6,6 +6,8 @@ export interface IdempotencyRecord {
   response: any;
   statusCode: number;
   userId: string;
+  /** SHA-256 hex of the original request body — detects key reuse with a different payload. */
+  bodyHash: string;
   createdAt: number;
 }
 
