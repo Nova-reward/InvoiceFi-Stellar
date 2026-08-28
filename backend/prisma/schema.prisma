@@ -68,10 +68,34 @@ model Invoice {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
+  events       InvoiceEvent[]
+
   @@index([status])
   @@index([farmer])
   @@index([investor])
   @@index([funder])
+}
+
+/// Append-only audit log of invoice lifecycle transitions. Each row records
+/// one status change with the actor, optional transaction hash, and a
+/// monotonically increasing sequence number scoped to the invoice.
+model InvoiceEvent {
+  id               String        @id @default(uuid())
+  invoice          Invoice       @relation(fields: [invoiceOnchainId], references: [onchainId])
+  invoiceOnchainId BigInt
+  previousStatus   InvoiceStatus?
+  newStatus        InvoiceStatus
+  /// Wallet address of the user or system that triggered the transition.
+  actorId          String
+  /// On-chain transaction hash (optional — absent for off-chain events).
+  txHash           String?
+  /// Unix epoch in nanoseconds of when the event occurred on-chain.
+  occurredAtNanos  BigInt
+  /// Monotonically increasing counter scoped to this invoice.
+  sequence         Int           @default(autoincrement())
+  createdAt        DateTime      @default(now())
+
+  @@index([invoiceOnchainId, sequence])
 }
 
 /// An asynchronous regulatory export request and its signed result.
@@ -198,6 +222,7 @@ model WebhookDelivery {
 /// Immutable log entry for one delivery attempt, queryable via the delivery
 /// log API for debugging subscriber-side failures.
 model WebhookDeliveryAttempt {
+
   id            String          @id @default(uuid())
   delivery      WebhookDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
   deliveryId    String
@@ -210,3 +235,64 @@ model WebhookDeliveryAttempt {
 
   @@index([deliveryId])
 }
+
+/// Persistent audit record written by the DLQ processor when an invoice-
+/// reminder job exhausts all Bull retries. One row per exhausted job.
+/// Provides an ops-queryable failure log independent of the transient
+/// Redis queue state.
+model InvoiceReminderFailure {
+  id           String   @id @default(uuid())
+  /// The invoice that could not be reminded. Stored as a string because the
+  /// invoice-reminder module targets a richer schema (User + dueDate) that is
+  /// not yet fully migrated; keeps the failure log loosely coupled.
+  invoiceId    String
+  errorMessage String
+  attemptCount Int
+  /// Bull job ID for cross-referencing queue history logs.
+  jobId        String?
+  failedAt     DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([failedAt])
+}
+
+/// Stores idempotency keys for POST endpoints (invoice creation, financing,
+/// settlement). Provides DB-level locking to prevent concurrent duplicates
+/// and body-hash fingerprinting to detect key reuse with a different payload.
+///
+/// The lifecycle of a row:
+///   1. Row inserted with `lockedAt = now()` when a first request arrives.
+///   2. On success the handler sets `statusCode`, `responseBody`, `lockedAt = null`.
+///   3. Subsequent retries with the same key get the cached response.
+///   4. The cleanup job deletes rows once `expiresAt` has passed (default 24 h).
+///   5. Stale locks (crash-orphaned) are reclaimed by the cleanup job after 5 min.
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  /// The UUID key submitted by the client via Idempotency-Key header.
+  key          String
+  /// Scoped per user to prevent cross-user key reuse.
+  userId       String
+  /// SHA-256 hex digest of the canonical JSON request body.
+  bodyHash     String
+  /// HTTP status code of the cached response (0 while the row is locked).
+  statusCode   Int      @default(0)
+  /// Serialized JSON response body. Empty object while row is locked.
+  responseBody Json     @default("{}")
+  /// Endpoint path this key was used for (e.g. "POST /invoices").
+  requestPath  String
+  /// Worker lock: set when a request is in-flight to prevent concurrent races.
+  lockedAt     DateTime?
+  /// Lock owner identifier (e.g. hostname:pid) for crash recovery diagnostics.
+  lockOwner    String?
+  /// When this record expires and should be deleted by the cleanup job.
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([key, userId])
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([lockedAt])
+}
+
+

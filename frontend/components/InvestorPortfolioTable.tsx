@@ -221,6 +221,8 @@ export default function InvestorPortfolioTable({ invoices }: Props) {
 
       {/* ── Data table ────────────────────────────────────────────────────── */}
       <div className="table-wrapper">
+        <table aria-label="Investment portfolio">
+          <caption className="sr-only">List of funded invoices with amounts, rates, and status</caption>
         {/*
           role="grid" allows arrow-key navigation between cells for users of
           screen readers that support the grid widget. aria-rowcount reflects
@@ -235,7 +237,7 @@ export default function InvestorPortfolioTable({ invoices }: Props) {
             List of funded invoices with amounts, rates, and status
           </caption>
           <thead>
-            <tr role="row">
+            <tr>
               <th scope="col">Invoice ID</th>
               <th scope="col">Farmer</th>
               <th scope="col">Crop Type</th>

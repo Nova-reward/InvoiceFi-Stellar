@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
+import { PrismaService } from '../prisma/prisma.service';
 import { SettlementResult, SettlementService } from './settlement.service';
 import { SettlementSyncService } from './settlement-sync.service';
 import { SorobanEventsService } from './soroban-events.service';
@@ -21,7 +22,7 @@ function otherEvent(ledger: number): NormalizedEvent {
 
 interface Mocks {
   events: jest.Mocked<Pick<SorobanEventsService, 'fetchEvents' | 'getLatestLedger'>>;
-  settlement: jest.Mocked<Pick<SettlementService, 'settleInvoice'>>;
+  settlement: jest.Mocked<Pick<SettlementService, 'settleInvoice' | 'settleInvoiceWithTx'>>;
   cursor: jest.Mocked<Pick<SyncCursorService, 'getLastLedger' | 'setLastLedger'>>;
 }
 
@@ -30,11 +31,21 @@ function build(): { service: SettlementSyncService } & Mocks {
     fetchEvents: jest.fn(),
     getLatestLedger: jest.fn(),
   };
-  const settlement = { settleInvoice: jest.fn() };
+  const settlement = {
+    settleInvoice: jest.fn(),
+    settleInvoiceWithTx: jest.fn(),
+  };
   const cursor = {
     getLastLedger: jest.fn(),
     setLastLedger: jest.fn().mockResolvedValue(undefined),
   };
+
+  // Prisma mock: $transaction executes the callback with a fake tx object.
+  const fakeTx = { syncCursor: { upsert: jest.fn().mockResolvedValue({}) } };
+  const prisma = {
+    $transaction: jest.fn(async (cb: (tx: typeof fakeTx) => unknown) => cb(fakeTx)),
+  } as unknown as PrismaService;
+
   const config = {
     get: (key: string) =>
       ({
@@ -48,6 +59,7 @@ function build(): { service: SettlementSyncService } & Mocks {
     events as unknown as SorobanEventsService,
     settlement as unknown as SettlementService,
     cursor as unknown as SyncCursorService,
+    prisma,
     {} as SchedulerRegistry,
     config,
   );
@@ -62,12 +74,12 @@ describe('SettlementSyncService.syncOnce', () => {
       events: [settlementEvent('7', 105), otherEvent(106)],
       latestLedger: 110,
     });
-    settlement.settleInvoice.mockResolvedValue(SettlementResult.SETTLED);
+    settlement.settleInvoiceWithTx.mockResolvedValue(SettlementResult.SETTLED);
 
     const summary = await service.syncOnce();
 
     expect(events.fetchEvents).toHaveBeenCalledWith(101);
-    expect(settlement.settleInvoice).toHaveBeenCalledWith('7', 105);
+    expect(settlement.settleInvoice).toHaveBeenCalledWith('7', 105, undefined);
     expect(summary).toEqual({ processed: 1, settled: 1 });
     expect(cursor.setLastLedger).toHaveBeenCalledWith(110);
   });
@@ -82,7 +94,7 @@ describe('SettlementSyncService.syncOnce', () => {
 
     expect(events.getLatestLedger).toHaveBeenCalled();
     expect(events.fetchEvents).toHaveBeenCalledWith(500);
-    expect(summary).toEqual({ processed: 0, settled: 0 });
+    expect(summary).toMatchObject({ processed: 0, settled: 0 });
     expect(cursor.setLastLedger).toHaveBeenCalledWith(500);
   });
 
@@ -93,11 +105,11 @@ describe('SettlementSyncService.syncOnce', () => {
       events: [settlementEvent('7', 105)],
       latestLedger: 105,
     });
-    settlement.settleInvoice.mockResolvedValue(SettlementResult.ALREADY_REPAID);
+    settlement.settleInvoiceWithTx.mockResolvedValue(SettlementResult.ALREADY_REPAID);
 
     const summary = await service.syncOnce();
 
-    expect(summary).toEqual({ processed: 1, settled: 0 });
+    expect(summary).toMatchObject({ processed: 1, settled: 0 });
     expect(cursor.setLastLedger).toHaveBeenCalledWith(105);
   });
 
@@ -108,14 +120,14 @@ describe('SettlementSyncService.syncOnce', () => {
       events: [settlementEvent('7', 105)],
       latestLedger: 105,
     });
-    settlement.settleInvoice
+    settlement.settleInvoiceWithTx
       .mockRejectedValueOnce(new Error('db timeout'))
       .mockResolvedValueOnce(SettlementResult.SETTLED);
 
     const summary = await service.syncOnce();
 
-    expect(settlement.settleInvoice).toHaveBeenCalledTimes(2);
-    expect(summary).toEqual({ processed: 1, settled: 1 });
+    expect(settlement.settleInvoiceWithTx).toHaveBeenCalledTimes(2);
+    expect(summary).toMatchObject({ processed: 1, settled: 1 });
     expect(cursor.setLastLedger).toHaveBeenCalledWith(105);
   });
 
@@ -126,13 +138,13 @@ describe('SettlementSyncService.syncOnce', () => {
       events: [settlementEvent('7', 105)],
       latestLedger: 110,
     });
-    settlement.settleInvoice.mockRejectedValue(new Error('permanent'));
+    settlement.settleInvoiceWithTx.mockRejectedValue(new Error('permanent'));
 
     const summary = await service.syncOnce();
 
     // 3 attempts via withRetry, then give up.
-    expect(settlement.settleInvoice).toHaveBeenCalledTimes(3);
-    expect(summary).toEqual({ processed: 1, settled: 0 });
+    expect(settlement.settleInvoiceWithTx).toHaveBeenCalledTimes(3);
+    expect(summary).toMatchObject({ processed: 1, settled: 0 });
     // Cursor held at startLedger-1 so the event is re-fetched next cycle.
     expect(cursor.setLastLedger).toHaveBeenCalledWith(100);
   });

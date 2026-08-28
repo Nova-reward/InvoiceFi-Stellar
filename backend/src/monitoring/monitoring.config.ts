@@ -16,6 +16,10 @@ export interface MonitoringConfig {
   fundingVelocityCountThreshold: number;
   oracleDeviationBps: number;
   pauserRoleNames: string[];
+  relativeVolumeSpikeEnabled: boolean;
+  relativeVolumeSpikeMultiple: number;
+  unusualDiscountEnabled: boolean;
+  unusualDiscountStdDevMultiple: number;
 }
 
 const numberFrom = (config: ConfigService, key: string, fallback: number): number => {
@@ -45,4 +49,8 @@ export const loadMonitoringConfig = (config: ConfigService): MonitoringConfig =>
   fundingVelocityCountThreshold: numberFrom(config, 'ANOMALY_VELOCITY_COUNT_THRESHOLD', 25),
   oracleDeviationBps: numberFrom(config, 'ANOMALY_ORACLE_DEVIATION_BPS', 500),
   pauserRoleNames: listFrom(config.get<string>('ANOMALY_PAUSER_ROLE_NAMES') ?? 'pauser,emergency_pauser'),
+  relativeVolumeSpikeEnabled: (config.get<string>('ANOMALY_RELATIVE_VOLUME_SPIKE_ENABLED') ?? 'true') !== 'false',
+  relativeVolumeSpikeMultiple: numberFrom(config, 'ANOMALY_RELATIVE_VOLUME_SPIKE_MULTIPLE', 3),
+  unusualDiscountEnabled: (config.get<string>('ANOMALY_UNUSUAL_DISCOUNT_ENABLED') ?? 'true') !== 'false',
+  unusualDiscountStdDevMultiple: numberFrom(config, 'ANOMALY_UNUSUAL_DISCOUNT_STD_DEV_MULTIPLE', 3),
 });
