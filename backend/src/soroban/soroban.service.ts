@@ -96,6 +96,76 @@ export class SorobanService {
     return this.invoke(contract, 'settle_invoice', args, 'settlement');
   }
 
+  /**
+   * Submit a signed price update to the oracle aggregator contract.
+   * The signature is verified on-chain by the contract.
+   */
+  async submitOraclePrice(params: {
+    oracleContractId: string;
+    submitterWallet: string;
+    assetPair: string;
+    price: number;
+    signature: string;
+  }): Promise<{ txHash: string }> {
+    this.logger.log(
+      `Submitting oracle price: ${params.assetPair} = ${params.price} from ${params.submitterWallet}`,
+    );
+
+    // Real implementation would:
+    // 1. Build a Soroban transaction invoking oracle.submit_price
+    // 2. Sign with the submitter's secret key
+    // 3. Submit via Soroban RPC
+    // 4. Return the transaction hash
+    //
+    // Example using stellar-sdk:
+    // const server = new SorobanRpc.Server(this.sorobanRpcUrl);
+    // const account = await server.getAccount(params.submitterWallet);
+    // const tx = new TransactionBuilder(account, { ... })
+    //   .addOperation(ContractOperation.invokeHostFunction({
+    //     contractId: params.oracleContractId,
+    //     functionName: 'submit_price',
+    //     args: [Symbol(params.assetPair), params.price]
+    //   }))
+    //   .build();
+    // const signedTx = tx.sign(submitterSecretKey);
+    // const result = await server.sendTransaction(signedTx);
+
+    throw new Error('Not implemented – replace with stellar-sdk call');
+  }
+
+  /**
+   * Fetch the current aggregated price from the oracle contract.
+   * Returns null if the price is stale or unavailable.
+   */
+  async getOraclePrice(params: {
+    oracleContractId: string;
+    assetPair: string;
+  }): Promise<{ price: number; ledger: number } | null> {
+    this.logger.debug(`Fetching oracle price for ${params.assetPair}`);
+
+    // Real implementation would:
+    // 1. Simulate a read-only call to oracle.get_price
+    // 2. Parse the result (Option<(i128, u64)>)
+    // 3. Return null if None, otherwise return (price, ledger)
+    //
+    // Example using stellar-sdk:
+    // const server = new SorobanRpc.Server(this.sorobanRpcUrl);
+    // const result = await server.simulateTransaction(
+    //   params.oracleContractId,
+    //   'get_price',
+    //   [Symbol(params.assetPair)]
+    // );
+    // if (result.result?.xdr) {
+    //   const decoded = decodeScVal(result.result.xdr);
+    //   if (decoded.is_some()) {
+    //     return { price: decoded.unwrap().0, ledger: decoded.unwrap().1 };
+    //   }
+    // }
+    // return null;
+
+    throw new Error('Not implemented – replace with stellar-sdk call');
+  }
+
   /** Parse a raw Soroban diagnostic error string into a typed ContractError. */
   parseContractError(raw: string, kind?: SorobanContractKind): ContractError {
     const numericCode = this.extractNumericErrorCode(raw);
