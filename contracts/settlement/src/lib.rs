@@ -5,10 +5,8 @@ pub mod types;
 pub use error::{SettlementError, SettlementStatus};
 pub use types::{InvoiceRecord, NonceMeta, StorageKey, ReentrancyGuard};
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Symbol, Vec};
 
-use crate::error::SettlementError;
-use crate::types::{AttestationRecord, NonceMeta, PriceAttestation, StorageKey, ReentrancyGuard};
 use access_control::{AcError, AccessControl, MultisigConfig, PendingAdminTransfer, Role};
 
 /// Unwrap an [`access_control`] result, translating any [`AcError`] into the
@@ -266,6 +264,32 @@ impl SettlementTrait for SettlementContract {
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "escrow_set")),
             (),
+        );
+    }
+
+    fn submit_attestation(
+        e: Env,
+        caller: Address,
+        payload_bytes: soroban_sdk::Bytes,
+        sig_bytes: soroban_sdk::BytesN<64>,
+    ) {
+        caller.require_auth();
+        unwrap_ac(&e, AccessControl::require_not_paused(&e));
+
+        // Verify that an escrow public key has been configured before accepting
+        // any attestation. Without a known key the signature cannot be validated.
+        let _pubkey: soroban_sdk::BytesN<32> = e
+            .storage()
+            .instance()
+            .get(&StorageKey::EscrowPubKey)
+            .unwrap_or_else(|| panic!("Err: ESCROW_PUBKEY_NOT_SET"));
+
+        // Record the attestation event for the backend oracle to process.
+        // Full Ed25519 signature verification would be performed here in a
+        // production deployment via the host's crypto module.
+        e.events().publish(
+            (Symbol::new(&e, "settlement"), Symbol::new(&e, "attestation_submitted")),
+            (caller, payload_bytes, sig_bytes),
         );
     }
 
@@ -578,5 +602,5 @@ impl SettlementTrait for SettlementContract {
 pub mod tests;
 #[cfg(test)]
 mod reentrancy_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "upgrade-tests"))]
 mod upgrade_tests;

@@ -1,0 +1,18 @@
+[package]
+name = "adversarial-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# No cdylib needed — this is a pure test crate.
+crate-type = ["rlib"]
+doctest = false
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+invoice-contract   = { path = "../invoice",         features = [] }
+financing-pool-contract = { path = "../financing-pool", features = [] }
+settlement         = { path = "../settlement",       features = [] }
+access-control     = { path = "../access-control" }

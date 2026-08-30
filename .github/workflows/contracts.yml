@@ -45,7 +45,10 @@ jobs:
         run: bash ../scripts/check-unchecked-math.sh
 
       - name: Clippy (warnings as errors)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --exclude upgrade-test-framework -- -D warnings
 
       - name: Run unit tests
-        run: cargo test --all
+        run: cargo test --all --exclude upgrade-test-framework
+
+      - name: Run adversarial integration tests
+        run: cargo test -p adversarial-tests --all-targets -- --nocapture

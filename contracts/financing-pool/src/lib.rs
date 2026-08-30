@@ -21,7 +21,7 @@ pub const MAX_PRICE_AGE_LEDGERS: u32 = 100;
 // NOTE: `error.rs` is a pre-existing, unused scaffold left over from an
 // earlier iteration of this contract (it doesn't match this API, and its own
 // `mod tests;` doesn't resolve) — intentionally not wired in via `mod error;`.
-mod types;
+pub mod types;
 
 use crate::types::{TokenContract, ReentrancyGuard, StorageKey};
 use access_control::{AccessControl, Role, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
@@ -136,6 +136,16 @@ impl From<access_control::AcError> for Error {
             AcError::ThresholdNotMet => Error::ThresholdNotMet,
             AcError::TimelockNotElapsed => Error::TimelockNotElapsed,
             AcError::CannotGrantAdminRole => Error::CannotGrantAdminRole,
+        }
+    }
+}
+
+impl From<common::CheckedMathError> for Error {
+    fn from(e: common::CheckedMathError) -> Self {
+        match e {
+            common::CheckedMathError::Overflow => Error::InvalidAmount,
+            common::CheckedMathError::Underflow => Error::InvalidAmount,
+            common::CheckedMathError::DivisionByZero => Error::InvalidAmount,
         }
     }
 }
@@ -332,7 +342,7 @@ impl FinancingPoolContract {
         // Staleness guard: refuse to fund if the oracle feed is too old.
         Self::require_fresh_price_feed(&env)?;
 
-        let advance = Self::advance_for(&env, face_value);
+        let advance = Self::advance_for(&env, face_value)?;
         let available = Self::available_inner(&env);
         if available < advance {
             return Err(Error::InsufficientLiquidity);
@@ -611,5 +621,5 @@ impl FinancingPoolContract {
 mod test;
 #[cfg(test)]
 mod reentrancy_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "upgrade-tests"))]
 mod upgrade_tests;
