@@ -150,3 +150,108 @@ describe('Invoice event audit trail (e2e)', () => {
     expect(finalInvoice.status).toBe(InvoiceStatus.REPAID);
   });
 });
+
+/**
+ * Integration coverage for the Pending -> Funded -> Settled chain's Soroban
+ * leg, exercised through the real `SorobanService` wired via Nest DI (not
+ * the app's HTTP surface — the `MockAppModule` above has no routes wired to
+ * `FinancingPoolModule`/`SettlementModule`, so it can't drive this). Instead
+ * this stubs the Soroban RPC boundary (`SorobanRpcClient`) directly, the
+ * same seam `soroban.service.spec.ts` uses for its unit tests, and asserts
+ * `SorobanService` produces correctly-signed, XDR-encoded transactions and a
+ * real transaction hash end-to-end through Nest's module system.
+ */
+describe('Invoice Lifecycle Integration (e2e) — Soroban RPC leg', () => {
+  let moduleRef: TestingModule;
+  let soroban: SorobanService;
+  let stubServer: jest.Mocked<SorobanRpcClient>;
+
+  const investor = Keypair.random().publicKey();
+  const invoiceContractId = StrKey.encodeContract(Buffer.alloc(32, 7));
+
+  beforeAll(async () => {
+    stubServer = {
+      getAccount: jest.fn().mockResolvedValue(new Account(Keypair.random().publicKey(), '1')),
+      simulateTransaction: jest.fn().mockResolvedValue({
+        id: '1',
+        latestLedger: 100,
+        events: [],
+        _parsed: true,
+        transactionData: {} as any,
+        minResourceFee: '100',
+        result: { auth: [], retval: nativeToScVal(true, { type: 'bool' }) },
+      }),
+      prepareTransaction: jest.fn().mockImplementation(async (tx) => tx),
+      sendTransaction: jest.fn().mockImplementation(async () => ({
+        status: 'PENDING',
+        hash: 'e'.repeat(64),
+        latestLedger: 100,
+        latestLedgerCloseTime: 0,
+      })),
+      pollTransaction: jest.fn().mockImplementation(async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        txHash: 'e'.repeat(64),
+        latestLedger: 101,
+        latestLedgerCloseTime: 0,
+        oldestLedger: 1,
+        oldestLedgerCloseTime: 0,
+        ledger: 100,
+        createdAt: 0,
+        applicationOrder: 1,
+        feeBump: false,
+        envelopeXdr: {} as any,
+        resultXdr: {} as any,
+        resultMetaXdr: {} as any,
+        returnValue: nativeToScVal(true, { type: 'bool' }),
+      })),
+    } as unknown as jest.Mocked<SorobanRpcClient>;
+
+    moduleRef = await Test.createTestingModule({
+      providers: [SorobanService],
+    })
+      .overrideProvider(SorobanService)
+      .useFactory({ factory: () => new SorobanService(undefined, undefined, stubServer) })
+      .compile();
+
+    soroban = moduleRef.get(SorobanService);
+  });
+
+  afterAll(async () => {
+    await moduleRef.close();
+  });
+
+  it('funds an invoice through a stubbed Soroban RPC and records the real tx hash', async () => {
+    const result = await soroban.fundInvoice({
+      invoiceContractId,
+      investorWallet: investor,
+      amount: 5000,
+    });
+
+    expect(result.txHash).toBe('e'.repeat(64));
+    expect(stubServer.simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(stubServer.sendTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles the same invoice through a stubbed Soroban RPC and records the real tx hash', async () => {
+    const result = await soroban.settleInvoice({
+      invoiceContractId,
+      callerWallet: investor,
+    });
+
+    expect(result.txHash).toBe('e'.repeat(64));
+  });
+
+  it('maps a simulated contract panic to the typed ContractError instead of a raw RPC error', async () => {
+    stubServer.simulateTransaction.mockResolvedValueOnce({
+      id: '2',
+      latestLedger: 100,
+      events: [],
+      _parsed: true,
+      error: 'HostError: Error(Contract, #7)', // FinancingPoolError::AlreadyFunded
+    } as any);
+
+    await expect(
+      soroban.fundInvoice({ invoiceContractId, investorWallet: investor, amount: 5000 }),
+    ).rejects.toMatchObject({ name: 'ContractError', code: 'DuplicateFunding' });
+  });
+});

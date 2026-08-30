@@ -1,4 +1,4 @@
-.PHONY: up down build logs ps clean staging
+.PHONY: up down build logs ps clean staging check-storage-keys
 
 ## Start the full local stack
 up:
@@ -27,3 +27,8 @@ ps:
 ## Start staging stack
 staging:
 	docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build
+
+## Check for storage key collisions across contracts
+check-storage-keys:
+	./scripts/check-storage-keys.sh
+

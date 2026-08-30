@@ -1,0 +1,27 @@
+# Dependencies & Build Outputs
+node_modules/
+target/
+contracts/target/
+dist/
+build/
+.next/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs & Temporary files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+*.swp
+*.swo
+
+# IDE & Editor files
+.vscode/
+.idea/

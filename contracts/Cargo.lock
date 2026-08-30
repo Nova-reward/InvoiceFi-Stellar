@@ -10,6 +10,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "adversarial-tests"
+version = "0.1.0"
+dependencies = [
+ "access-control",
+ "financing-pool-contract",
+ "invoice-contract",
+ "settlement",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
