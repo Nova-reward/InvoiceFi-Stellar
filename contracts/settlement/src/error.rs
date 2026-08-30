@@ -61,6 +61,16 @@ impl From<access_control::AcError> for SettlementError {
     }
 }
 
+impl From<common::CheckedMathError> for SettlementError {
+    fn from(e: common::CheckedMathError) -> Self {
+        match e {
+            common::CheckedMathError::Overflow => SettlementError::ZeroAmount,
+            common::CheckedMathError::Underflow => SettlementError::ZeroAmount,
+            common::CheckedMathError::DivisionByZero => SettlementError::ZeroAmount,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum SettlementStatus {

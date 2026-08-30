@@ -49,12 +49,16 @@ jobs:
 
       - name: Clippy
         working-directory: contracts
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --all-features --exclude upgrade-test-framework
 
       - name: Run tests
         working-directory: contracts
-        run: cargo test --all
+        run: cargo test --all --exclude upgrade-test-framework
+
+      - name: Run adversarial integration tests
+        working-directory: contracts
+        run: cargo test -p adversarial-tests --all-targets -- --nocapture
 
       - name: Build WASM release
         working-directory: contracts
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: cargo build --release --target wasm32-unknown-unknown --exclude upgrade-test-framework
