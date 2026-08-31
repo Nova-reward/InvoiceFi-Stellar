@@ -44,7 +44,7 @@
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^6.4.14",
     "@types/passport-jwt": "^4.0.1",
-    "@types/supertest": "^6.0.2",
+    "@types/supertest": "^7.2.1",
     "fast-check": "^3.15.1",
     "jest": "^30.4.2",
     "prisma": "^7.9.1",
