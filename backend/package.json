@@ -1,12 +1,12 @@
 {
   "name": "invoicefi-backend",
   "version": "0.1.0",
-  "description": "InvoiceFi-Stellar NestJS backend — on-chain settlement sync and dashboard API",
+  "description": "InvoiceFi-Stellar NestJS backend \u2014 on-chain settlement sync and dashboard API",
   "license": "MIT",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/main",
-    "start:dev": "ts-node src/main.ts",
+    "build": "node init && tsc -p tsconfig.json",
+    "start": "node init && node dist/main",
+    "start:dev": "node init && ts-node src/main.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",

@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use soroban_sdk::{symbol_short, Address, Env, String};
+use soroban_sdk::{symbol_short, Address, Env, String, testutils::Address as _};
 use invoice_contract::{InvoiceContract, InvoiceContractClient};
 
 fuzz_target!(|data: (u64, i128)| {
