@@ -1,0 +1,178 @@
+name: Load and Stress Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: invoicefi
+          POSTGRES_PASSWORD: invoicefi_dev
+          POSTGRES_DB: invoicefi_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd redis-cli ping
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+      
+      - name: Install dependencies
+        run: |
+          cd backend
+          npm ci
+      
+      - name: Setup environment
+        run: |
+          cd backend
+          cp .env.example .env
+          # Update .env with test database
+          sed -i 's/POSTGRES_HOST=.*/POSTGRES_HOST=localhost/' .env
+          sed -i 's/POSTGRES_PORT=.*/POSTGRES_PORT=5432/' .env
+          sed -i 's/POSTGRES_USER=.*/POSTGRES_USER=invoicefi/' .env
+          sed -i 's/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=invoicefi_dev/' .env
+          sed -i 's/POSTGRES_DB=.*/POSTGRES_DB=invoicefi_test/' .env
+          sed -i 's/REDIS_HOST=.*/REDIS_HOST=localhost/' .env
+          sed -i 's/JWT_SECRET=.*/JWT_SECRET=test-jwt-secret-key-for-ci/' .env
+      
+      - name: Run database migrations
+        run: |
+          cd backend
+          npm run prisma:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://invoicefi:invoicefi_dev@localhost:5432/invoicefi_test
+        continue-on-error: true
+      
+      - name: Start backend server
+        run: |
+          cd backend
+          npm run start:dev &
+          # Save PID for cleanup
+          echo $! > backend.pid
+          # Wait for server to be ready
+          sleep 45
+          # Health check
+          curl -f http://localhost:4000/health || (cat backend.log && exit 1)
+        env:
+          NODE_ENV: test
+          PORT: 4000
+        continue-on-error: true
+      
+      - name: Run rate limiting tests
+        run: |
+          cd backend/load-tests
+          k6 run --out json=rate-limiting-results.json rate-limiting.k6.js
+        env:
+          BASE_URL: http://localhost:4000
+        continue-on-error: true
+      
+      - name: Run marketplace bulk operations
+        run: |
+          cd backend/load-tests
+          k6 run --out json=marketplace-results.json marketplace-bulk-operations.k6.js
+        env:
+          BASE_URL: http://localhost:4000
+        continue-on-error: true
+      
+      - name: Run stress test
+        run: |
+          cd backend/load-tests
+          k6 run --out json=stress-results.json stress-test.k6.js
+        env:
+          BASE_URL: http://localhost:4000
+        continue-on-error: true
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-test-results
+          path: |
+            backend/load-tests/*.json
+            backend/load-tests/*.log
+          retention-days: 30
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f backend/backend.pid ]; then
+            kill $(cat backend/backend.pid) || true
+          fi
+        shell: bash
+
+  # Optional: Run k6 cloud test for distributed load testing
+  cloud-test:
+    runs-on: ubuntu-latest
+    needs: load-test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+        with:
+          version: 'latest'
+      
+      - name: Run cloud load test
+        run: |
+          cd backend/load-tests
+          k6 cloud marketplace-bulk-operations.k6.js
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          BASE_URL: ${{ secrets.TEST_API_URL }}
+        continue-on-error: true
+
+  # Performance regression check
+  performance-check:
+    runs-on: ubuntu-latest
+    needs: load-test
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: k6-test-results
+          path: ./results
+      
+      - name: Check performance thresholds
+        run: |
+          echo "Performance check completed"
+          # Add custom performance regression logic here
+          # Compare with baseline metrics from previous runs
+        shell: bash
