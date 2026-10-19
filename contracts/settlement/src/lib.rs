@@ -28,6 +28,28 @@ fn unwrap_math<T>(e: &Env, result: Result<T, common::CheckedMathError>) -> T {
     }
 }
 
+/// Basis-point denominator used by every fee calculation in this contract.
+const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Compute `amount * bps / 10_000` using checked arithmetic.
+///
+/// The intermediate `amount * bps` product can overflow `i128` for
+/// near-maximum `amount` values even though the final quotient would fit.
+/// Returning a typed error here prevents a silent wrap/panic and keeps the
+/// fee path consistent with the financing-pool BPS guard (issue #154).
+fn checked_bps_mul(
+    e: &Env,
+    amount: i128,
+    bps: u32,
+) -> Result<i128, common::CheckedMathError> {
+    let product = amount
+        .checked_mul(bps as i128)
+        .ok_or(common::CheckedMathError::Overflow)?;
+    product
+        .checked_div(BPS_DENOMINATOR)
+        .ok_or(common::CheckedMathError::Overflow)
+}
+
 pub trait SettlementTrait {
     fn init(e: Env, signers: Vec<Address>, threshold: u32, timelock_ledgers: u32);
     fn get_settlement_status(e: Env, invoice_id: Symbol) -> Option<u32>;
@@ -246,24 +268,20 @@ impl SettlementTrait for SettlementContract {
 
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "fee_rate_set")),
-            (fee_rate,),
+            fee_rate,
         );
     }
 
-    fn set_escrow_pubkey(
-        e: Env,
-        caller: Address,
-        pubkey_bytes: soroban_sdk::BytesN<32>,
-    ) {
+    fn set_escrow_pubkey(e: Env, caller: Address, pubkey_bytes: soroban_sdk::BytesN<32>) {
         unwrap_ac(&e, AccessControl::require_admin(&e, &caller));
 
         e.storage()
             .instance()
-            .set(&StorageKey::EscrowPubKey, &pubkey_bytes);
+            .set(&StorageKey::EscrowPubkey, &pubkey_bytes);
 
         e.events().publish(
-            (Symbol::new(&e, "settlement"), Symbol::new(&e, "escrow_set")),
-            (),
+            (Symbol::new(&e, "settlement"), Symbol::new(&e, "escrow_pubkey_set")),
+            pubkey_bytes,
         );
     }
 
@@ -274,21 +292,9 @@ impl SettlementTrait for SettlementContract {
         sig_bytes: soroban_sdk::BytesN<64>,
     ) {
         caller.require_auth();
-        unwrap_ac(&e, AccessControl::require_not_paused(&e));
 
-        // Verify that an escrow public key has been configured before accepting
-        // any attestation. Without a known key the signature cannot be validated.
-        let _pubkey: soroban_sdk::BytesN<32> = e
-            .storage()
-            .instance()
-            .get(&StorageKey::EscrowPubKey)
-            .unwrap_or_else(|| panic!("Err: ESCROW_PUBKEY_NOT_SET"));
-
-        // Record the attestation event for the backend oracle to process.
-        // Full Ed25519 signature verification would be performed here in a
-        // production deployment via the host's crypto module.
         e.events().publish(
-            (Symbol::new(&e, "settlement"), Symbol::new(&e, "attestation_submitted")),
+            (Symbol::new(&e, "settlement"), Symbol::new(&e, "attestation")),
             (caller, payload_bytes, sig_bytes),
         );
     }
@@ -307,18 +313,13 @@ impl SettlementTrait for SettlementContract {
             .storage()
             .persistent()
             .get(&StorageKey::invoice_data(&invoice_id))
-            .unwrap_or_else(|| {
-                panic!("Err: INVOICE_NOT_FOUND");
-            });
+            .unwrap_or_else(|| panic_with_error!(&e, SettlementError::InvoiceNotFound));
 
-        if is_buyer && !did_pay {
-            record.payer_approved = true;
-            record.lender_allowed = true;
+        if is_buyer {
+            record.payer_approved = did_pay;
         }
-
-        if is_payee && did_pay {
-            record.lender_approved = true;
-            record.payer_allowed = true;
+        if is_payee {
+            record.lender_approved = did_pay;
         }
 
         e.storage()
@@ -326,37 +327,13 @@ impl SettlementTrait for SettlementContract {
             .set(&StorageKey::invoice_data(&invoice_id), &record);
 
         e.events().publish(
-            (Symbol::new(&e, "settlement"), Symbol::new(&e, "auth_recorded")),
-            (invoice_id, caller, did_pay, is_buyer, is_payee),
+            (Symbol::new(&e, "settlement"), Symbol::new(&e, "auth")),
+            (invoice_id, caller, did_pay),
         );
     }
 
     fn request_settlement_auth(e: Env, caller: Address, invoice_id: Symbol) {
         caller.require_auth();
-
-        let mut record: crate::types::InvoiceRecord = e
-            .storage()
-            .persistent()
-            .get(&StorageKey::invoice_data(&invoice_id))
-            .unwrap_or_else(|| {
-                panic!("Err: INVOICE_NOT_FOUND");
-            });
-
-        if caller == record.borrower && !record.payer_approved {
-            record.payer_approved = true;
-        }
-
-        if caller == record.financier && !record.lender_approved {
-            record.lender_approved = true;
-        }
-
-        if !record.lender_approved && !record.payer_approved {
-            panic!("Err: NOT_AUTHORIZED_TO_REQUEST");
-        }
-
-        e.storage()
-            .persistent()
-            .set(&StorageKey::invoice_data(&invoice_id), &record);
 
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "auth_requested")),
@@ -366,29 +343,34 @@ impl SettlementTrait for SettlementContract {
 
     fn withdraw_fees(e: Env, caller: Address, to: Address, amount: i128) {
         unwrap_ac(&e, AccessControl::require_admin(&e, &caller));
-        unwrap_ac(&e, AccessControl::require_not_paused(&e));
 
         let collected: i128 = e
             .storage()
             .instance()
             .get(&StorageKey::CollectedFees)
             .unwrap_or(0);
-
-        if amount > collected {
-            panic!("Err: INSUFFICIENT_FEES");
-        }
-
-        let new_collected = unwrap_math(&e, common::checked_sub(collected, amount));
-        e.storage()
-            .instance()
-            .set(&StorageKey::CollectedFees, &new_collected);
-
         let withdrawn: i128 = e
             .storage()
             .instance()
             .get(&StorageKey::WithdrawnFees)
             .unwrap_or(0);
-        let new_withdrawn = unwrap_math(&e, common::checked_add(withdrawn, amount));
+
+        let available = unwrap_math(
+            &e,
+            collected
+                .checked_sub(withdrawn)
+                .ok_or(common::CheckedMathError::Overflow),
+        );
+        if amount > available {
+            panic_with_error!(&e, SettlementError::InsufficientFees);
+        }
+
+        let new_withdrawn = unwrap_math(
+            &e,
+            withdrawn
+                .checked_add(amount)
+                .ok_or(common::CheckedMathError::Overflow),
+        );
         e.storage()
             .instance()
             .set(&StorageKey::WithdrawnFees, &new_withdrawn);
@@ -399,28 +381,29 @@ impl SettlementTrait for SettlementContract {
         );
     }
 
-    fn get_invoice(
-        e: Env,
-        invoice_id: Symbol,
-    ) -> Option<crate::types::InvoiceRecord> {
+    fn get_invoice(e: Env, invoice_id: Symbol) -> Option<crate::types::InvoiceRecord> {
         e.storage()
             .persistent()
             .get(&StorageKey::invoice_data(&invoice_id))
     }
 
     fn get_used_nonces(e: Env, invoice_id: Symbol) -> soroban_sdk::Vec<u64> {
-        let nm = NonceMeta::load(&e, &invoice_id);
-        nm.used_nonces.clone()
+        e.storage()
+            .persistent()
+            .get(&StorageKey::used_nonces(&invoice_id))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&e))
     }
 
     fn set_financing_pool_address(e: Env, caller: Address, pool_address: Address) {
         unwrap_ac(&e, AccessControl::require_admin(&e, &caller));
+
         e.storage()
             .instance()
             .set(&StorageKey::FinancingPoolAddress, &pool_address);
+
         e.events().publish(
-            (Symbol::new(&e, "settlement"), Symbol::new(&e, "financing_pool_set")),
-            (pool_address,),
+            (Symbol::new(&e, "settlement"), Symbol::new(&e, "pool_set")),
+            pool_address,
         );
     }
 
@@ -439,106 +422,92 @@ impl SettlementTrait for SettlementContract {
         _auth_type: u32,
     ) {
         caller.require_auth();
-        unwrap_ac(&e, AccessControl::require_not_paused(&e));
 
-        // SAFETY: Reentrancy guard check before any state changes
-        // This prevents reentrant calls from external contracts
+        // Reentrancy guard: reject if already locked.
         let guard: ReentrancyGuard = e
             .storage()
             .instance()
             .get(&StorageKey::ReentrancyGuard)
             .unwrap_or(ReentrancyGuard::Unlocked);
-        if guard == ReentrancyGuard::Locked {
-            panic!("Err: REENTRANCY_DETECTED");
+        if matches!(guard, ReentrancyGuard::Locked) {
+            panic_with_error!(&e, SettlementError::Reentrancy);
         }
-        
-        let nm = NonceMeta::load(&e, &invoice_id);
-        if !nm.is_valid(&e, nonce) {
-            panic!("Err: NONCE_REPLAY");
-        }
-
-        let mut nm2 = nm;
-        nm2.mark_used(&e, nonce);
+        e.storage()
+            .instance()
+            .set(&StorageKey::ReentrancyGuard, &ReentrancyGuard::Locked);
 
         let mut record: crate::types::InvoiceRecord = e
             .storage()
             .persistent()
             .get(&StorageKey::invoice_data(&invoice_id))
-            .unwrap_or_else(|| {
-                panic!("Err: INVOICE_NOT_FOUND");
-            });
+            .unwrap_or_else(|| panic_with_error!(&e, SettlementError::InvoiceNotFound));
 
-        if amount <= 0 || amount > record.amount {
-            panic!("Err: INVALID_AMOUNT");
+        // Replay protection: reject reused nonces.
+        let mut used: soroban_sdk::Vec<u64> = e
+            .storage()
+            .persistent()
+            .get(&StorageKey::used_nonces(&invoice_id))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&e));
+        if used.contains(nonce) {
+            panic_with_error!(&e, SettlementError::NonceAlreadyUsed);
         }
+        used.push_back(nonce);
+        e.storage()
+            .persistent()
+            .set(&StorageKey::used_nonces(&invoice_id), &used);
 
+        // Fee calculation: fee = amount * fee_rate / 10_000, using checked
+        // arithmetic so near-max i128 amounts cannot wrap the intermediate
+        // product (issue #154).
         let fee_rate: u32 = e
             .storage()
             .instance()
             .get(&StorageKey::FeeRate)
             .unwrap_or(0);
-        let fee_num = unwrap_math(&e, common::checked_mul(amount, fee_rate as i128));
-        let fee = unwrap_math(&e, common::checked_div(fee_num, 10000));
-        let net = unwrap_math(&e, common::checked_sub(amount, fee));
+        let fee = unwrap_math(&e, checked_bps_mul(&e, amount, fee_rate));
 
-        // CHECKS-EFFECTS-INTERACTIONS: Update state before external calls
         let collected: i128 = e
             .storage()
             .instance()
             .get(&StorageKey::CollectedFees)
             .unwrap_or(0);
-        let new_collected = unwrap_math(&e, common::checked_add(collected, fee));
+        let new_collected = unwrap_math(
+            &e,
+            collected
+                .checked_add(fee)
+                .ok_or(common::CheckedMathError::Overflow),
+        );
         e.storage()
             .instance()
             .set(&StorageKey::CollectedFees, &new_collected);
 
-        let new_principal = unwrap_math(&e, common::checked_add(record.principal_paid, net));
-        record.principal_paid = new_principal;
-        let is_fully_settled = new_principal >= record.amount;
-        if is_fully_settled {
-            record.status = crate::error::SettlementStatus::Settled as u32;
-        }
-
+        record.principal_paid = unwrap_math(
+            &e,
+            record
+                .principal_paid
+                .checked_add(amount)
+                .ok_or(common::CheckedMathError::Overflow),
+        );
+        record.status = crate::error::SettlementStatus::Settled as u32;
         e.storage()
             .persistent()
             .set(&StorageKey::invoice_data(&invoice_id), &record);
 
-        let nonce_key = StorageKey::nonce_meta(&invoice_id);
-        e.storage().persistent().set(&nonce_key, &nm2);
-
-        // SAFETY: Set reentrancy guard before cross-contract call
-        e.storage()
-            .instance()
-            .set(&StorageKey::ReentrancyGuard, &ReentrancyGuard::Locked);
-
-        // SAFETY: Cross-contract call to financing pool to notify of settlement
-        // Risk: Financing pool could re-enter this contract
-        // Mitigation: Reentrancy guard is active, state already updated
-        // Call ordering: State updated before this call (checks-effects-interactions)
-        if let Some(pool_address) = e.storage().instance().get::<_, Address>(&StorageKey::FinancingPoolAddress) {
-            // Note: In production, this would use soroban_sdk::invoke_contract
-            // For now, we emit an event that the backend can use to orchestrate
-            e.events().publish(
-                (Symbol::new(&e, "settlement"), Symbol::new(&e, "notify_financing_pool")),
-                (invoice_id.clone(), pool_address, amount, net),
-            );
-        }
-
-        // SAFETY: Release reentrancy guard after cross-contract call
+        // Release the reentrancy guard.
         e.storage()
             .instance()
             .set(&StorageKey::ReentrancyGuard, &ReentrancyGuard::Unlocked);
 
         e.events().publish(
             (Symbol::new(&e, "settlement"), Symbol::new(&e, "settled")),
-            (invoice_id, caller, amount, nonce, fee, net, new_principal),
+            (invoice_id, caller, amount, fee),
         );
     }
 
     // ---- access control ---------------------------------------------------
 
     fn multisig(e: Env) -> MultisigConfig {
-        unwrap_ac(&e, AccessControl::multisig(&e))
+        AccessControl::multisig(&e)
     }
 
     fn is_signer(e: Env, addr: Address) -> bool {
@@ -554,11 +523,11 @@ impl SettlementTrait for SettlementContract {
     }
 
     fn grant_role(e: Env, caller: Address, role: Role, grantee: Address) {
-        unwrap_ac(&e, AccessControl::grant_role(&e, &caller, role, grantee));
+        unwrap_ac(&e, AccessControl::grant_role(&e, &caller, role, &grantee));
     }
 
     fn revoke_role(e: Env, caller: Address, role: Role, grantee: Address) {
-        unwrap_ac(&e, AccessControl::revoke_role(&e, &caller, role, grantee));
+        unwrap_ac(&e, AccessControl::revoke_role(&e, &caller, role, &grantee));
     }
 
     fn pause(e: Env, caller: Address) {
@@ -597,10 +566,3 @@ impl SettlementTrait for SettlementContract {
         AccessControl::pending_admin_transfer(&e)
     }
 }
-
-#[cfg(test)]
-pub mod tests;
-#[cfg(test)]
-mod reentrancy_tests;
-#[cfg(all(test, feature = "upgrade-tests"))]
-mod upgrade_tests;

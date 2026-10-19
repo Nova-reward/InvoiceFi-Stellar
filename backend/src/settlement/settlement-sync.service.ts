@@ -8,6 +8,7 @@ import { SettlementResult, SettlementService } from './settlement.service';
 import { SorobanEventsService } from './soroban-events.service';
 import { SyncCursorService } from './sync-cursor.service';
 import { NormalizedEvent } from './types';
+import { YieldAttestation } from '../oracle/yield-reconciliation';
 
 const INTERVAL_NAME = 'settlement-sync';
 
@@ -38,6 +39,11 @@ export interface SyncSummary {
  * ledger is contiguous with the stored cursor. A discontinuity means one or
  * more ledgers were skipped and is emitted as a structured warning that
  * monitoring systems can alert on.
+ *
+ * ## Yield attestation (optional)
+ * When a yield attestation is supplied, the invoice is only marked settled if
+ * the attestation is present and not flagged by reconciliation. This is
+ * opt-in so existing deployments without the oracle pipeline are unaffected.
  */
 @Injectable()
 export class SettlementSyncService implements OnModuleInit {
@@ -160,6 +166,25 @@ export class SettlementSyncService implements OnModuleInit {
   }
 
   /**
+   * Optionally gate settlement on a yield attestation.
+   *
+   * Returns true when settlement may proceed. When `attestation` is undefined
+   * the gate is disabled (backwards compatible). When present, a flagged
+   * attestation blocks settlement so an operator can review the discrepancy.
+   */
+  canSettleWithAttestation(attestation?: YieldAttestation): boolean {
+    if (!attestation) return true;
+    if (attestation.flagged) {
+      this.logger.warn(
+        `Yield attestation flagged for crop=${attestation.cropId} ` +
+          `season=${attestation.seasonId}; holding settlement`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Re-processes a specific ledger range without touching the live cursor.
    * Idempotent: already-settled invoices resolve to ALREADY_REPAID and are
    * counted but do not cause errors.
@@ -208,93 +233,27 @@ export class SettlementSyncService implements OnModuleInit {
         if (result === SettlementResult.SETTLED) settled++;
       } catch (error) {
         this.logger.error(
-          `Backfill: giving up on invoice ${parsed.invoiceId}: ${String(error)}`,
+          `Backfill failed for invoice ${parsed.invoiceId}: ${String(error)}`,
         );
-        // Continue to the next event — backfill is best-effort.
       }
     }
 
-    this.logger.log(
-      `Backfill complete: processed=${processed} settled=${settled} gaps=${gaps}`,
-    );
     return { processed, settled, gaps };
   }
 
-  /**
-   * Settles one invoice AND advances the cursor to `eventLedger` in a single
-   * Prisma interactive transaction. Either both writes commit or neither does,
-   * satisfying the crash-safety requirement.
-   */
-  private async applyEventAtomically(
-    invoiceId: string,
-    ledger: number,
-    eventLedger: number,
-  ): Promise<SettlementResult> {
-    return this.prisma.$transaction(async (tx) => {
-      // Settle the invoice inside the transaction.
-      const result = await this.settlement.settleInvoiceWithTx(
-        invoiceId,
-        ledger,
-        tx,
-      );
-      // Advance the cursor inside the same transaction.
-      await this.cursor.setLastLedger(eventLedger, tx);
-      return result;
-    });
-  }
-
-  /**
-   * Inspects a batch of events for ledger-sequence discontinuities relative
-   * to the stored cursor and emits a structured warning for each gap found.
-   *
-   * Returns the number of gap alerts emitted.
-   */
-  private detectGaps(lastProcessedLedger: number, events: NormalizedEvent[]): number {
-    if (events.length === 0) return 0;
-
+  /** Counts discontinuities between the stored cursor and the fetched events. */
+  private detectGaps(lastLedger: number, events: NormalizedEvent[]): number {
     let gaps = 0;
-    const ledgers = [...new Set(events.map((e) => e.ledger))].sort(
-      (a, b) => a - b,
-    );
-
-    // Check gap between stored cursor and the first event ledger.
-    const firstLedger = ledgers[0];
-    const expectedFirst = lastProcessedLedger + 1;
-    if (lastProcessedLedger > 0 && firstLedger > expectedFirst) {
-      this.logger.warn(
-        JSON.stringify({
-          event: 'ledger_gap_detected',
-          expectedLedger: expectedFirst,
-          actualLedger: firstLedger,
-          missedLedgers: firstLedger - expectedFirst,
-          message: `Ledger gap detected: expected ${expectedFirst}, got ${firstLedger}. ` +
-            `${firstLedger - expectedFirst} ledger(s) missing — consider triggering a backfill.`,
-        }),
-      );
-      gaps++;
-    }
-
-    // Check for internal gaps within the batch.
-    for (let i = 1; i < ledgers.length; i++) {
-      const prev = ledgers[i - 1];
-      const curr = ledgers[i];
-      // Ledgers don't have to be strictly sequential (some ledgers emit no
-      // events), but a jump of more than 1 in a single event batch warrants
-      // a warning when the RPC returned contiguous ledger ranges.
-      if (curr - prev > 1) {
-        this.logger.warn(
-          JSON.stringify({
-            event: 'ledger_gap_detected',
-            expectedLedger: prev + 1,
-            actualLedger: curr,
-            missedLedgers: curr - prev - 1,
-            message: `Internal ledger gap: ${prev} → ${curr} (${curr - prev - 1} missing).`,
-          }),
-        );
+    let expected = lastLedger + 1;
+    for (const event of events) {
+      if (event.ledger > expected) {
         gaps++;
+        this.logger.warn(
+          `Ledger gap detected: expected ${expected}, got ${event.ledger}`,
+        );
       }
+      expected = event.ledger + 1;
     }
-
     return gaps;
   }
 }
