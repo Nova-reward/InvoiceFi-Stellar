@@ -22,7 +22,7 @@ fn signers_of(env: &Env, addrs: &[Address]) -> Vec<Address> {
     v
 }
 
-fn setup_with(discount_bps: u32) -> Harness {
+fn setup_unfed_with(discount_bps: u32) -> Harness {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register(FinancingPoolContract, ());
@@ -36,6 +36,12 @@ fn setup_with(discount_bps: u32) -> Harness {
         &discount_bps,
     );
     Harness { env, client, admin }
+}
+
+fn setup_with(discount_bps: u32) -> Harness {
+    let h = setup_unfed_with(discount_bps);
+    h.client.set_price_feed(&h.admin, &1_000_000i128, &h.env.ledger().sequence());
+    h
 }
 
 fn setup() -> Harness {
@@ -445,7 +451,7 @@ fn admin_transfer_full_flow() {
 
 #[test]
 fn fund_invoice_requires_fresh_price_feed() {
-    let h = setup();
+    let h = setup_unfed_with(DISCOUNT_BPS);
     let lp = Address::generate(&h.env);
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
@@ -480,6 +486,9 @@ fn fund_invoice_rejects_stale_price_feed() {
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
 
+    h.env.ledger().with_mut(|li| {
+        li.sequence_number += MAX_PRICE_AGE_LEDGERS + 100;
+    });
     let current_ledger = h.env.ledger().sequence();
     // Set a stale price feed (older than MAX_PRICE_AGE_LEDGERS)
     let stale_timestamp = current_ledger - (MAX_PRICE_AGE_LEDGERS + 1);
@@ -498,6 +507,9 @@ fn fund_invoice_accepts_price_feed_at_exactly_max_age() {
     let farmer = Address::generate(&h.env);
     h.client.deposit(&lp, &10_000i128);
 
+    h.env.ledger().with_mut(|li| {
+        li.sequence_number += MAX_PRICE_AGE_LEDGERS + 100;
+    });
     let current_ledger = h.env.ledger().sequence();
     // Set a price feed exactly at the max age boundary (should be accepted)
     let boundary_timestamp = current_ledger - MAX_PRICE_AGE_LEDGERS;

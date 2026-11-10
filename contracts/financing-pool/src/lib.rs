@@ -22,6 +22,7 @@ pub const MAX_PRICE_AGE_LEDGERS: u32 = 100;
 // earlier iteration of this contract (it doesn't match this API, and its own
 // `mod tests;` doesn't resolve) — intentionally not wired in via `mod error;`.
 pub mod types;
+pub mod verification;
 
 use crate::types::{TokenContract, ReentrancyGuard, StorageKey};
 use access_control::{AccessControl, Role, MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS};
@@ -97,6 +98,8 @@ enum DataKey {
     Funding(u64),
     /// Oracle price feed: (price, timestamp_ledger).
     PriceFeed,
+    /// Dynamic oracle discount configuration.
+    OracleDiscountConfig,
 }
 
 #[contracterror]
@@ -494,7 +497,7 @@ impl FinancingPoolContract {
         env.events().publish(
             (Symbol::new(&env, "pool"), Symbol::new(&env, "oracle_config_set")),
             (
-                oracle_contract.unwrap_or(Address::from_contract_id(&env, &[0u8; 32])),
+                oracle_contract.unwrap_or(caller),
                 enabled,
                 min_discount_bps,
                 max_discount_bps,

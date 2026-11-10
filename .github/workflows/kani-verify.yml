@@ -1,0 +1,39 @@
+name: Kani Formal Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/financing-pool/**"
+      - ".github/workflows/kani-verify.yml"
+  pull_request:
+    paths:
+      - "contracts/financing-pool/**"
+      - ".github/workflows/kani-verify.yml"
+
+defaults:
+  run:
+    working-directory: contracts
+
+jobs:
+  kani-verify:
+    name: Kani Proof Invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Kani Verifier
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Verify Financing-Pool Invariants
+        run: |
+          cargo kani -p financing-pool-contract --output-format regular
+
+      - name: Run Verification Property Tests
+        run: |
+          cargo test -p financing-pool-contract --lib verification::tests
