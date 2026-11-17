@@ -27,4 +27,29 @@ impl NonceManager {
         let nm = NonceMeta::load(e, invoice_id);
         nm.is_valid(e, nonce)
     }
+
+    /// Atomically validates the nonce against `invoice_id` and records it as used.
+    /// If the nonce is already consumed or expired, returns `false` and does NOT modify storage.
+    /// If valid, updates storage immediately and returns `true`.
+    pub fn check_and_record(
+        e: &Env,
+        invoice_id: &Symbol,
+        nonce: u64,
+        due_date: u64,
+    ) -> bool {
+        let key = StorageKey::nonce_meta(invoice_id);
+        let mut nm = if let Some(meta) = e.storage().persistent().get::<_, NonceMeta>(&key) {
+            meta
+        } else {
+            NonceMeta::new(e, invoice_id.clone(), due_date)
+        };
+
+        if !nm.is_valid(e, nonce) {
+            return false;
+        }
+
+        nm.mark_used(e, nonce);
+        e.storage().persistent().set(&key, &nm);
+        true
+    }
 }
