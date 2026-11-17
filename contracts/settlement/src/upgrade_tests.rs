@@ -258,3 +258,65 @@ fn upgrade_preserves_admin_and_paused_state() {
     assert!(h.client.is_signer(&h.admin), "admin signer must survive upgrade");
     assert!(h.client.is_paused(), "paused state must survive upgrade");
 }
+
+/// Advanced upgrade round-trip test: Nonce replay protection and state isolation persist
+/// across contract upgrade, rejecting pre-upgrade nonces post-upgrade and permitting fresh nonces.
+#[test]
+fn test_nonce_state_persists_and_blocks_replay_through_upgrade() {
+    let h = deploy_v1();
+    let id_a = invoice_sym(&h.env, "INV_UPG_A");
+    let id_b = invoice_sym(&h.env, "INV_UPG_B");
+    let due_date: u64 = 1_800_000_000;
+    let (borrower_a, _financier_a) = plant_invoice(&h, &id_a, 20_000, due_date);
+    let (borrower_b, _financier_b) = plant_invoice(&h, &id_b, 20_000, due_date);
+
+    // In v1, consume nonce 10 and 20 for INV_UPG_A, and nonce 10 for INV_UPG_B
+    h.client.settle_invoice(&borrower_a, &id_a, &10u64, &1_000i128, &1u32);
+    h.client.settle_invoice(&borrower_a, &id_a, &20u64, &2_000i128, &1u32);
+    h.client.settle_invoice(&borrower_b, &id_b, &10u64, &3_000i128, &1u32);
+
+    // Verify v1 used nonces
+    let a_nonces_v1 = h.client.get_used_nonces(&id_a);
+    assert!(a_nonces_v1.contains(&10u64));
+    assert!(a_nonces_v1.contains(&20u64));
+    assert!(!a_nonces_v1.contains(&30u64));
+
+    let b_nonces_v1 = h.client.get_used_nonces(&id_b);
+    assert!(b_nonces_v1.contains(&10u64));
+    assert!(!b_nonces_v1.contains(&20u64));
+
+    // Simulate upgrade to v2
+    let _v2 = simulate_upgrade_to_v2(&h.env, &h.contract_id);
+
+    // After upgrade, verify that nonce history persisted across contracts
+    let a_nonces_v2 = h.client.get_used_nonces(&id_a);
+    assert!(a_nonces_v2.contains(&10u64));
+    assert!(a_nonces_v2.contains(&20u64));
+    assert!(!a_nonces_v2.contains(&30u64));
+
+    let b_nonces_v2 = h.client.get_used_nonces(&id_b);
+    assert!(b_nonces_v2.contains(&10u64));
+    assert!(!b_nonces_v2.contains(&20u64));
+
+    // Replay attack with pre-upgrade nonces MUST fail post-upgrade
+    assert!(
+        h.client.try_settle_invoice(&borrower_a, &id_a, &10u64, &500i128, &1u32).is_err(),
+        "Replaying nonce 10 on INV_UPG_A post-upgrade must be rejected"
+    );
+    assert!(
+        h.client.try_settle_invoice(&borrower_a, &id_a, &20u64, &500i128, &1u32).is_err(),
+        "Replaying nonce 20 on INV_UPG_A post-upgrade must be rejected"
+    );
+    assert!(
+        h.client.try_settle_invoice(&borrower_b, &id_b, &10u64, &500i128, &1u32).is_err(),
+        "Replaying nonce 10 on INV_UPG_B post-upgrade must be rejected"
+    );
+
+    // Unused nonces post-upgrade must succeed
+    h.client.settle_invoice(&borrower_a, &id_a, &30u64, &1_000i128, &1u32);
+    assert!(h.client.get_used_nonces(&id_a).contains(&30u64));
+
+    // Consuming nonce 20 on INV_UPG_B (which was only used on INV_UPG_A) must succeed
+    h.client.settle_invoice(&borrower_b, &id_b, &20u64, &1_000i128, &1u32);
+    assert!(h.client.get_used_nonces(&id_b).contains(&20u64));
+}

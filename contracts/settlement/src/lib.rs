@@ -451,14 +451,6 @@ impl SettlementTrait for SettlementContract {
         if guard == ReentrancyGuard::Locked {
             panic!("Err: REENTRANCY_DETECTED");
         }
-        
-        let nm = NonceMeta::load(&e, &invoice_id);
-        if !nm.is_valid(&e, nonce) {
-            panic!("Err: NONCE_REPLAY");
-        }
-
-        let mut nm2 = nm;
-        nm2.mark_used(&e, nonce);
 
         let mut record: crate::types::InvoiceRecord = e
             .storage()
@@ -467,6 +459,20 @@ impl SettlementTrait for SettlementContract {
             .unwrap_or_else(|| {
                 panic!("Err: INVOICE_NOT_FOUND");
             });
+
+        let nm_key = StorageKey::nonce_meta(&invoice_id);
+        let mut nm = if let Some(meta) = e.storage().persistent().get::<_, NonceMeta>(&nm_key) {
+            meta
+        } else {
+            NonceMeta::new(&e, invoice_id.clone(), record.due_date)
+        };
+
+        if !nm.is_valid(&e, nonce) {
+            panic!("Err: NONCE_REPLAY");
+        }
+
+        nm.mark_used(&e, nonce);
+        e.storage().persistent().set(&nm_key, &nm);
 
         if amount <= 0 || amount > record.amount {
             panic!("Err: INVALID_AMOUNT");
@@ -502,9 +508,6 @@ impl SettlementTrait for SettlementContract {
         e.storage()
             .persistent()
             .set(&StorageKey::invoice_data(&invoice_id), &record);
-
-        let nonce_key = StorageKey::nonce_meta(&invoice_id);
-        e.storage().persistent().set(&nonce_key, &nm2);
 
         // SAFETY: Set reentrancy guard before cross-contract call
         e.storage()

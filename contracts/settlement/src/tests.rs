@@ -122,16 +122,10 @@ fn test_settle_without_nonce_meta_creates_it() {
 
     assert!(client.get_used_nonces(&invoice_id).is_empty());
 
-    let deadline = 3000000000u64 + 2592000;
-    let nm_key = StorageKey::nonce_meta(&invoice_id);
-    let nm = NonceMeta::new(&e, invoice_id.clone(), deadline);
-
-    e.as_contract(&contract_id, || {
-        e.storage().persistent().set(&nm_key, &nm);
-    });
-
-    // Borrower authenticates as caller and settles invoice
+    // Borrower authenticates as caller and settles invoice without pre-planting NonceMeta.
+    // The contract must automatically instantiate NonceMeta using invoice_record.due_date.
     client.settle_invoice(&borrower, &invoice_id, &1, &3000, &0);
+    assert!(client.get_used_nonces(&invoice_id).contains(&1));
 }
 
 #[test]
@@ -356,4 +350,113 @@ fn admin_transfer_full_flow() {
 
     assert!(!client.is_signer(&s1));
     assert!(client.is_signer(&new_signer));
+}
+
+/// Regression test: Replay of the exact same (invoice_id, nonce) pair in the same ledger batch / transaction sequence
+#[test]
+fn test_same_invoice_nonce_cannot_be_submitted_twice_in_same_ledger() {
+    let (e, contract_id, client) = setup_test();
+    let admin = Address::generate(&e);
+    let payer = Address::generate(&e);
+
+    let signers = signers_of(&e, &[admin.clone()]);
+    client.init(&signers, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS);
+
+    let invoice_id = Symbol::new(&e, "INV_BATCH");
+    client.set_invoice_data(
+        &admin,
+        &invoice_id,
+        &payer,
+        &payer,
+        &10_000,
+        &2_000_000_000,
+        &0,
+    );
+
+    let deadline = 2_000_000_000u64 + 2592000;
+    let nm_key = StorageKey::nonce_meta(&invoice_id);
+    let nm = NonceMeta::new(&e, invoice_id.clone(), deadline);
+    e.as_contract(&contract_id, || {
+        e.storage().persistent().set(&nm_key, &nm);
+    });
+
+    // In a single ledger sequence, execute first settlement with nonce=7
+    client.settle_invoice(&payer, &invoice_id, &7, &2_000, &0);
+    assert_eq!(client.get_used_nonces(&invoice_id).contains(&7), true);
+
+    // Immediately submit the identical (invoice_id, nonce) pair within the same ledger state
+    let res = client.try_settle_invoice(&payer, &invoice_id, &7, &2_000, &0);
+    assert!(res.is_err(), "Duplicate nonce in same ledger sequence must fail");
+
+    // Ensure state was not modified by the failed call
+    let record = client.get_invoice(&invoice_id).unwrap();
+    assert_eq!(record.principal_paid, 2_000);
+}
+
+/// Regression test: Different invoice_id values sharing same storage key prefix do not collide
+#[test]
+fn test_nonce_isolation_across_different_invoices() {
+    let (e, _contract_id, client) = setup_test();
+    let admin = Address::generate(&e);
+    let payer = Address::generate(&e);
+
+    let signers = signers_of(&e, &[admin.clone()]);
+    client.init(&signers, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS);
+
+    let inv1 = Symbol::new(&e, "INV_A");
+    let inv2 = Symbol::new(&e, "INV_B");
+    client.set_invoice_data(&admin, &inv1, &payer, &payer, &5_000, &2_000_000_000, &0);
+    client.set_invoice_data(&admin, &inv2, &payer, &payer, &5_000, &2_000_000_000, &0);
+
+    // Use nonce 100 on inv1
+    client.settle_invoice(&payer, &inv1, &100, &1_000, &0);
+    assert!(client.get_used_nonces(&inv1).contains(&100));
+
+    // inv2 must NOT have nonce 100 marked as used
+    assert!(!client.get_used_nonces(&inv2).contains(&100));
+
+    // Consuming nonce 100 on inv2 must succeed independently
+    client.settle_invoice(&payer, &inv2, &100, &1_000, &0);
+    assert!(client.get_used_nonces(&inv2).contains(&100));
+
+    // Replay on either invoice should fail
+    assert!(client.try_settle_invoice(&payer, &inv1, &100, &1_000, &0).is_err());
+    assert!(client.try_settle_invoice(&payer, &inv2, &100, &1_000, &0).is_err());
+}
+
+/// Regression test: Settle invoice fails before recording nonce if invoice does not exist
+#[test]
+fn test_settle_invoice_fails_for_nonexistent_invoice_without_recording_nonce() {
+    let (e, _contract_id, client) = setup_test();
+    let admin = Address::generate(&e);
+    let payer = Address::generate(&e);
+
+    let signers = signers_of(&e, &[admin.clone()]);
+    client.init(&signers, &1u32, &MIN_ADMIN_TRANSFER_TIMELOCK_LEDGERS);
+
+    let ghost_id = Symbol::new(&e, "GHOST_INV");
+    let res = client.try_settle_invoice(&payer, &ghost_id, &1, &1_000, &0);
+    assert!(res.is_err());
+
+    // Nonce meta should not even exist for ghost invoice
+    assert!(client.get_used_nonces(&ghost_id).is_empty());
+}
+
+/// Regression test: NonceManager check_and_record helper function unit test
+#[test]
+fn test_nonce_manager_check_and_record() {
+    let (e, contract_id, _client) = setup_test();
+    let inv_id = Symbol::new(&e, "TEST_NM");
+    let due_date = 2_000_000_000u64;
+
+    e.as_contract(&contract_id, || {
+        // First check and record succeeds
+        assert!(crate::nonce::NonceManager::check_and_record(&e, &inv_id, 42, due_date));
+        // Validating the same nonce should now report invalid
+        assert!(!crate::nonce::NonceManager::is_valid(&e, &inv_id, 42));
+        // Second check and record fails (replay)
+        assert!(!crate::nonce::NonceManager::check_and_record(&e, &inv_id, 42, due_date));
+        // Another nonce succeeds
+        assert!(crate::nonce::NonceManager::check_and_record(&e, &inv_id, 43, due_date));
+    });
 }
