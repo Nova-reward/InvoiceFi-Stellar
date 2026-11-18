@@ -7,8 +7,6 @@ build/
 .next/
 
 # Environment variables
-.env
-.env.local
 .env.development.local
 .env.test.local
 .env.production.local
@@ -23,5 +21,5 @@ yarn-error.log*
 *.swo
 
 # IDE & Editor files
-.vscode/
 .idea/
+config.bat

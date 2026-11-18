@@ -1,0 +1,39 @@
+[package]
+name = "invoice-contract-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+invoice-contract = { path = ".." }
+
+# We need soroban-sdk from the workspace, but since we define a new workspace here, 
+# we should specify the exact version if workspace inheritance fails, or we can just inherit?
+# Actually, the parent workspace is at `../../Cargo.toml`. 
+# It's better to just specify the dependency explicitly to avoid workspace issues.
+soroban-sdk = { version = "26.1.0", features = ["testutils"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "mint"
+path = "fuzz_targets/mint.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fund"
+path = "fuzz_targets/fund.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "repayment"
+path = "fuzz_targets/repayment.rs"
+test = false
+doc = false

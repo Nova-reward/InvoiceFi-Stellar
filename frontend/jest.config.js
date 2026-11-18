@@ -23,4 +23,4 @@ const customJestConfig = {
   coveragePathIgnorePatterns: ['<rootDir>/.next/', '<rootDir>/node_modules/'],
 }
 
-module.exports = createJestConfig(customJestConfig)
+module.exports = createJestConfig(customJestConfig);
